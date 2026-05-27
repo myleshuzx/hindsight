@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { client } from "@/lib/api";
 import { useBank } from "@/lib/bank-context";
 import { DataView } from "./data-view";
@@ -320,6 +320,9 @@ export function DocumentsView() {
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [total, setTotal] = useState(0);
+  const searchQueryRef = useRef("");
+  const requestSeqRef = useRef(0);
+  const skipInitialSearchRef = useRef(true);
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
@@ -363,26 +366,39 @@ export function DocumentsView() {
     null
   );
 
-  const loadDocuments = async (page: number = 1) => {
-    if (!currentBank) return;
+  useEffect(() => {
+    searchQueryRef.current = searchQuery;
+  }, [searchQuery]);
 
-    setLoading(true);
-    try {
-      const pageOffset = (page - 1) * ITEMS_PER_PAGE;
-      const data: any = await client.listDocuments({
-        bank_id: currentBank,
-        q: searchQuery,
-        limit: ITEMS_PER_PAGE,
-        offset: pageOffset,
-      });
-      setDocuments(data.items || []);
-      setTotal(data.total || 0);
-    } catch (error) {
-      // Error toast is shown automatically by the API client interceptor
-    } finally {
-      setLoading(false);
-    }
-  };
+  const loadDocuments = useCallback(
+    async (page: number = 1, query: string = searchQueryRef.current) => {
+      if (!currentBank) return;
+
+      // Search requests can resolve out of order; only the newest response should update the list.
+      const requestSeq = ++requestSeqRef.current;
+      setLoading(true);
+      try {
+        const pageOffset = (page - 1) * ITEMS_PER_PAGE;
+        const data: any = await client.listDocuments({
+          bank_id: currentBank,
+          q: query,
+          limit: ITEMS_PER_PAGE,
+          offset: pageOffset,
+        });
+        if (requestSeq === requestSeqRef.current) {
+          setDocuments(data.items || []);
+          setTotal(data.total || 0);
+        }
+      } catch (error) {
+        // Error toast is shown automatically by the API client interceptor
+      } finally {
+        if (requestSeq === requestSeqRef.current) {
+          setLoading(false);
+        }
+      }
+    },
+    [currentBank]
+  );
 
   // Handle page change
   const handlePageChange = (newPage: number) => {
@@ -578,14 +594,19 @@ export function DocumentsView() {
   // Auto-load documents when component mounts or bank changes
   useEffect(() => {
     if (currentBank) {
+      skipInitialSearchRef.current = true;
       setCurrentPage(1);
       loadDocuments(1);
     }
-  }, [currentBank]);
+  }, [currentBank, loadDocuments]);
 
   // Reload when search query changes (with debounce)
   useEffect(() => {
     if (!currentBank) return;
+    if (skipInitialSearchRef.current) {
+      skipInitialSearchRef.current = false;
+      return;
+    }
 
     const timeoutId = setTimeout(() => {
       setCurrentPage(1);
@@ -593,11 +614,21 @@ export function DocumentsView() {
     }, 300); // 300ms debounce
 
     return () => clearTimeout(timeoutId);
-  }, [searchQuery]);
+  }, [currentBank, loadDocuments, searchQuery]);
 
   return (
     <div>
       {/* Documents List Section */}
+      <div className="px-5 mb-4">
+        <Input
+          type="text"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          placeholder="Search documents (ID)..."
+          className="max-w-2xl"
+        />
+      </div>
+
       {loading ? (
         <div className="flex items-center justify-center py-20">
           <div className="text-center">
@@ -612,16 +643,6 @@ export function DocumentsView() {
           </div>
           {/* Documents Table */}
           <div className="w-full">
-            <div className="px-5 mb-4">
-              <Input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search documents (ID)..."
-                className="max-w-2xl"
-              />
-            </div>
-
             <div className="overflow-x-auto px-5 pb-5">
               <Table>
                 <TableHeader>

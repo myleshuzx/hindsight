@@ -10,13 +10,14 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "bank_id is required" }, { status: 400 });
     }
 
+    const q = searchParams.get("q") || undefined;
     const limit = searchParams.get("limit") ? Number(searchParams.get("limit")) : undefined;
     const offset = searchParams.get("offset") ? Number(searchParams.get("offset")) : undefined;
 
     const response = await sdk.listDocuments({
       client: lowLevelClient,
       path: { bank_id: bankId },
-      query: { limit, offset },
+      query: { q, limit, offset },
     });
 
     return NextResponse.json(response.data, { status: 200 });
