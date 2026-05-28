@@ -1917,6 +1917,19 @@ def test_consolidation_prompt_default():
     assert "{observations_text}" in prompt
 
 
+def test_consolidation_prompt_preserves_chinese_names():
+    """Consolidation should preserve source language and Chinese names in observation text."""
+    from hindsight_api.engine.consolidation.prompts import build_batch_consolidation_prompt
+
+    prompt = build_batch_consolidation_prompt()
+
+    assert "If source facts are Chinese, the observation text MUST be Chinese." in prompt
+    assert "Never transliterate Chinese names into pinyin." in prompt
+    assert "李明最近经常加班到凌晨。" in prompt
+    assert "张伟在 Acme Corp 担任高级工程师。" in prompt
+    assert "Zhang Wei" not in prompt
+
+
 def test_consolidation_prompt_observations_mission():
     """Test that observations_mission replaces the default mission but keeps processing rules."""
     from hindsight_api.engine.consolidation.prompts import build_batch_consolidation_prompt

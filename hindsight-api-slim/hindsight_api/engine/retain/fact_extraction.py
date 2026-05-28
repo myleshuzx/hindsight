@@ -500,9 +500,23 @@ def _chunk_conversation(turns: list[dict], max_chars: int) -> list[str]:
 
 # Base prompt template (shared by concise and custom modes)
 # Uses {extraction_guidelines} placeholder for mode-specific instructions
+_LANGUAGE_AND_NAME_PRESERVATION = """LANGUAGE AND NAME PRESERVATION:
+- For all output values that represent remembered content, use the same natural language as the input text.
+- Preserve names exactly as written in the input.
+- If the input contains Chinese names, places, nicknames, organizations, or titles, keep the original Chinese characters.
+- Never transliterate Chinese names into pinyin.
+- Never translate Chinese personal names, place names, or nicknames into English.
+- Preserve mixed-language technical terms such as OpenAI, GitHub, Docker, and Python exactly as written.
+- JSON field names and enum values must remain exactly as specified by the schema.
+
+对于中文输入：事实文本、实体名、人物名、地名、昵称、机构名必须保留原始中文写法。禁止将中文姓名转成拼音，禁止将中文地名翻译成英文。"""
+
 _BASE_FACT_EXTRACTION_PROMPT = """Extract SIGNIFICANT facts from text. Be SELECTIVE - only extract facts worth remembering long-term.
 
 LANGUAGE: MANDATORY — Detect the language of the input text and produce ALL output in that EXACT same language. You are STRICTLY FORBIDDEN from translating or switching to any other language. Every single word of your output must be in the same language as the input. Do NOT output in a different language under any circumstance.
+
+
+{language_and_name_preservation}
 
 {retain_mission_section}{extraction_guidelines}
 
@@ -600,6 +614,14 @@ Output: ONLY 2 facts (skip coffee preference - too trivial):
 1. what="Alice has 5 years Kubernetes experience, CKA certified", who="Alice", entities=["Alice", "Kubernetes", "CKA"]
 2. what="Alice leads infrastructure team since March", who="Alice", entities=["Alice", "infrastructure"]
 
+Example 3 - Chinese name preservation:
+Input: "张伟昨天说，他准备下个月去杭州见老同学王敏，并在 GitHub 上整理 Python 项目。"
+
+Correct output preserves Chinese names and mixed-language technical terms:
+1. what="张伟准备下个月去杭州见老同学王敏，并在 GitHub 上整理 Python 项目", who="张伟，王敏（张伟的老同学）", entities=["张伟", "杭州", "王敏", "GitHub", "Python"]
+
+Incorrect output romanizes or translates Chinese names, places, or nicknames. Do not do this.
+
 ══════════════════════════════════════════════════════════════════════════
 QUALITY OVER QUANTITY
 ══════════════════════════════════════════════════════════════════════════
@@ -613,6 +635,7 @@ an experience or person."""
 
 # Assembled concise prompt
 CONCISE_FACT_EXTRACTION_PROMPT = _BASE_FACT_EXTRACTION_PROMPT.format(
+    language_and_name_preservation=_LANGUAGE_AND_NAME_PRESERVATION,
     retain_mission_section="{retain_mission_section}",
     extraction_guidelines=_CONCISE_GUIDELINES,
     examples=_CONCISE_EXAMPLES,
@@ -620,6 +643,7 @@ CONCISE_FACT_EXTRACTION_PROMPT = _BASE_FACT_EXTRACTION_PROMPT.format(
 
 # Custom prompt uses same base but without examples
 CUSTOM_FACT_EXTRACTION_PROMPT = _BASE_FACT_EXTRACTION_PROMPT.format(
+    language_and_name_preservation=_LANGUAGE_AND_NAME_PRESERVATION,
     retain_mission_section="{retain_mission_section}",
     extraction_guidelines="{custom_instructions}",
     examples="",  # No examples for custom mode
@@ -641,6 +665,7 @@ RULES:
 - fact_type: use "world" unless the content is clearly an interaction with the assistant."""
 
 VERBATIM_FACT_EXTRACTION_PROMPT = _BASE_FACT_EXTRACTION_PROMPT.format(
+    language_and_name_preservation=_LANGUAGE_AND_NAME_PRESERVATION,
     retain_mission_section="{retain_mission_section}",
     extraction_guidelines=_VERBATIM_GUIDELINES,
     examples="",
@@ -651,6 +676,17 @@ VERBATIM_FACT_EXTRACTION_PROMPT = _BASE_FACT_EXTRACTION_PROMPT.format(
 VERBOSE_FACT_EXTRACTION_PROMPT = """Extract facts from text into structured format with FIVE required dimensions - BE EXTREMELY DETAILED.
 
 LANGUAGE: MANDATORY — Detect the language of the input text and produce ALL output in that EXACT same language. You are STRICTLY FORBIDDEN from translating or switching to any other language. Every single word of your output must be in the same language as the input. Do NOT output in a different language under any circumstance.
+
+LANGUAGE AND NAME PRESERVATION:
+- For all output values that represent remembered content, use the same natural language as the input text.
+- Preserve names exactly as written in the input.
+- If the input contains Chinese names, places, nicknames, organizations, or titles, keep the original Chinese characters.
+- Never transliterate Chinese names into pinyin.
+- Never translate Chinese personal names, place names, or nicknames into English.
+- Preserve mixed-language technical terms such as OpenAI, GitHub, Docker, and Python exactly as written.
+- JSON field names and enum values must remain exactly as specified by the schema.
+
+对于中文输入：事实文本、实体名、人物名、地名、昵称、机构名必须保留原始中文写法。禁止将中文姓名转成拼音，禁止将中文地名翻译成英文。
 
 {retain_mission_section}══════════════════════════════════════════════════════════════════════════
 FACT FORMAT - ALL FIVE DIMENSIONS REQUIRED - MAXIMUM VERBOSITY

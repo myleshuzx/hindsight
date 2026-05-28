@@ -3,6 +3,19 @@
 # Default mission when no bank-specific mission is set
 _DEFAULT_MISSION = "Track every detail: names, numbers, dates, places, and relationships. Prefer specifics over abstractions, never generalise."
 
+_LANGUAGE_AND_NAME_RULES = """Language and name preservation (always apply):
+
+Determine the primary natural language of NEW FACTS.
+
+For every creates[].text and updates[].text:
+- Use the same primary natural language as the source facts.
+- If source facts are Chinese, the observation text MUST be Chinese.
+- Preserve personal names, place names, nicknames, organization names, and titles exactly as written in the source facts.
+- Never transliterate Chinese names into pinyin.
+- Never translate Chinese names, places, or nicknames into English.
+- Preserve mixed-language technical terms such as OpenAI, GitHub, Docker, and Python exactly as written.
+- Keep JSON field names, UUIDs, observation_id, source_fact_ids, creates, updates, and deletes exactly as specified."""
+
 # Processing rules — always present regardless of mission
 _PROCESSING_RULES = """Processing rules (always apply):
 
@@ -52,23 +65,24 @@ Output a JSON object with three arrays.
 ## EXAMPLE
 
 Input facts:
-[a1b2c3d4-e5f6-7890-abcd-ef1234567890] Alice mentioned she works long hours, often past midnight | Involving: Alice (occurred_start=2024-01-15, mentioned_at=2024-01-15)
-[b2c3d4e5-f6a7-8901-bcde-f12345678901] Alice said she's exhausted from the project deadlines | Involving: Alice (occurred_start=2024-01-20, mentioned_at=2024-01-20)
+[a1b2c3d4-e5f6-7890-abcd-ef1234567890] 李明提到他最近经常加班到凌晨 | Involving: 李明 (occurred_start=2024-01-15, mentioned_at=2024-01-15)
+[b2c3d4e5-f6a7-8901-bcde-f12345678901] 李明说他因为项目截止日期感到很疲惫 | Involving: 李明 (occurred_start=2024-01-20, mentioned_at=2024-01-20)
 
 Good observation text — clean prose, no metadata, each fact tracked distinctly:
-  "Alice works long hours, often past midnight."
-  "Alice feels exhausted from project deadlines."
+  "李明最近经常加班到凌晨。"
+  "李明因为项目截止日期感到疲惫。"
 
 Bad observation text — NEVER do this (verbatim copy of fact text with metadata):
-  "Alice mentioned she works long hours, often past midnight | Involving: Alice (occurred_start=2024-01-15, mentioned_at=2024-01-15)"
+  "李明提到他最近经常加班到凌晨 | Involving: 李明 (occurred_start=2024-01-15, mentioned_at=2024-01-15)"
+  "An English or pinyin rendering of 李明's observation."
 
 Observation text rules:
 - Write clean prose — NEVER copy raw fact lines or their metadata (temporal fields, "Involving:", "When:" labels, UUIDs).
 - Parenthesized metadata like (occurred_start=...) and pipe-separated labels like "| Involving: ..." are fact formatting — strip them entirely from observation text.
 - How many observations to create and how much to aggregate is driven by the MISSION above.
 
-{{"creates": [{{"text": "Alice works long hours, often past midnight.", "source_fact_ids": ["a1b2c3d4-e5f6-7890-abcd-ef1234567890"]}}, {{"text": "Alice feels exhausted from project deadlines.", "source_fact_ids": ["b2c3d4e5-f6a7-8901-bcde-f12345678901"]}}],
-  "updates": [{{"text": "Alice works at Acme Corp as a senior engineer", "observation_id": "c3d4e5f6-a7b8-9012-cdef-123456789012", "source_fact_ids": ["d4e5f6a7-b8c9-0123-defa-234567890123"]}}],
+{{"creates": [{{"text": "李明最近经常加班到凌晨。", "source_fact_ids": ["a1b2c3d4-e5f6-7890-abcd-ef1234567890"]}}, {{"text": "李明因为项目截止日期感到疲惫。", "source_fact_ids": ["b2c3d4e5-f6a7-8901-bcde-f12345678901"]}}],
+  "updates": [{{"text": "张伟在 Acme Corp 担任高级工程师。", "observation_id": "c3d4e5f6-a7b8-9012-cdef-123456789012", "source_fact_ids": ["d4e5f6a7-b8c9-0123-defa-234567890123"]}}],
   "deletes": [{{"observation_id": "e5f6a7b8-c9d0-1234-efab-345678901234"}}]}}
 
 Rules:
@@ -99,6 +113,7 @@ def build_batch_consolidation_prompt(
     return (
         "You are a memory consolidation system. Synthesize facts into observations "
         "and merge with existing observations when appropriate.\n\n"
+        f"{_LANGUAGE_AND_NAME_RULES}\n\n"
         f"## MISSION\n{mission}{capacity_section}\n\n"
         f"{_PROCESSING_RULES}" + _BATCH_DATA_SECTION + _BATCH_OUTPUT_FORMAT
     )

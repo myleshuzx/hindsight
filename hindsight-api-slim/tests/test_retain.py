@@ -2740,6 +2740,108 @@ def test_retain_mission_injected_into_prompt():
     assert "FOCUS" in prompt_verbose
 
 
+def test_retain_prompt_preserves_chinese_names():
+    """Retain extraction should explicitly preserve Chinese names and places."""
+    from unittest.mock import MagicMock
+
+    from hindsight_api.engine.retain.fact_extraction import _build_extraction_prompt_and_schema
+
+    config = MagicMock()
+    config.retain_extraction_mode = "concise"
+    config.retain_mission = None
+    config.retain_custom_instructions = None
+    config.retain_extract_causal_links = False
+
+    prompt, _ = _build_extraction_prompt_and_schema(config)
+
+    assert "Never transliterate Chinese names into pinyin." in prompt
+    assert "禁止将中文姓名转成拼音" in prompt
+    assert "张伟准备下个月去杭州见老同学王敏" in prompt
+    assert 'entities=["张伟", "杭州", "王敏", "GitHub", "Python"]' in prompt
+    assert "Zhang Wei" not in prompt
+
+    config.retain_extraction_mode = "verbose"
+    prompt_verbose, _ = _build_extraction_prompt_and_schema(config)
+    assert "Never transliterate Chinese names into pinyin." in prompt_verbose
+    assert "禁止将中文姓名转成拼音" in prompt_verbose
+
+
+@pytest.mark.asyncio
+async def test_chinese_retain_extraction_preserves_names_with_mock_llm():
+    """Mock retain extraction should keep Chinese fact text and entities unromanized."""
+    from unittest.mock import MagicMock
+
+    from hindsight_api.engine.response_models import TokenUsage
+    from hindsight_api.engine.retain.fact_extraction import _extract_facts_from_chunk
+
+    class FakeLLMConfig:
+        provider = "mock"
+        model = "mock-model"
+        captured_prompt = ""
+
+        async def call(self, **kwargs):
+            messages = kwargs["messages"]
+            self.captured_prompt = messages[0]["content"]
+            return {
+                "facts": [
+                    {
+                        "what": "张伟准备下个月去杭州见老同学王敏",
+                        "when": "下个月",
+                        "where": "杭州",
+                        "who": "张伟，王敏（张伟的老同学）",
+                        "why": "N/A",
+                        "fact_type": "world",
+                        "entities": [{"text": "张伟"}, {"text": "杭州"}, {"text": "王敏"}],
+                    },
+                    {
+                        "what": "我在 GitHub 上整理 Python 项目",
+                        "when": "昨天",
+                        "where": "GitHub",
+                        "who": "我",
+                        "why": "N/A",
+                        "fact_type": "assistant",
+                        "entities": [{"text": "GitHub"}, {"text": "Python"}],
+                    },
+                ]
+            }, TokenUsage(input_tokens=1, output_tokens=1)
+
+    config = MagicMock()
+    config.retain_extraction_mode = "concise"
+    config.retain_mission = None
+    config.retain_custom_instructions = None
+    config.retain_extract_causal_links = False
+    config.retain_max_completion_tokens = None
+    config.retain_llm_max_retries = None
+    config.llm_max_retries = 1
+    config.retain_llm_initial_backoff = None
+    config.llm_initial_backoff = 0.0
+    config.retain_llm_max_backoff = None
+    config.llm_max_backoff = 0.0
+    config.entity_labels = None
+    config.entities_allow_free_form = True
+
+    llm_config = FakeLLMConfig()
+    facts, _ = await _extract_facts_from_chunk(
+        chunk="张伟昨天说，他准备下个月去杭州见老同学王敏。我在 GitHub 上整理 Python 项目。",
+        chunk_index=0,
+        total_chunks=1,
+        event_date=datetime(2024, 1, 15, tzinfo=timezone.utc),
+        context="中文日记",
+        llm_config=llm_config,
+        config=config,
+    )
+
+    all_text = " ".join(f.fact for f in facts)
+    all_entities = " ".join(entity.text for fact in facts for entity in fact.entities or [])
+    assert "张伟" in all_text
+    assert "王敏" in all_entities
+    assert "杭州" in all_entities
+    assert "Zhang Wei" not in all_text
+    assert "Zhang Wei" not in all_entities
+    assert [fact.fact_type for fact in facts] == ["world", "experience"]
+    assert "Never transliterate Chinese names into pinyin." in llm_config.captured_prompt
+
+
 def test_retain_mission_absent_when_not_set():
     """Test that no FOCUS section appears when retain_mission is not set."""
     from unittest.mock import MagicMock
