@@ -417,6 +417,10 @@ export class HindsightClient {
       type?: string;
       q?: string;
       consolidationState?: "failed" | "pending" | "done";
+      sort?: "timeline";
+      order?: "asc" | "desc";
+      documentId?: string;
+      chunkId?: string;
       signal?: AbortSignal;
     }
   ): Promise<ListMemoryUnitsResponse> {
@@ -429,6 +433,10 @@ export class HindsightClient {
         type: options?.type,
         q: options?.q,
         consolidation_state: options?.consolidationState,
+        sort: options?.sort,
+        order: options?.order,
+        document_id: options?.documentId,
+        chunk_id: options?.chunkId,
       },
       signal: options?.signal,
     });

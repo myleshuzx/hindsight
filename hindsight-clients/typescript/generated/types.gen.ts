@@ -3555,6 +3555,22 @@ export type ListMemoriesData = {
      */
     consolidation_state?: string | null;
     /**
+     * Sort
+     */
+    sort?: string | null;
+    /**
+     * Order
+     */
+    order?: string | null;
+    /**
+     * Document Id
+     */
+    document_id?: string | null;
+    /**
+     * Chunk Id
+     */
+    chunk_id?: string | null;
+    /**
      * Limit
      */
     limit?: number;

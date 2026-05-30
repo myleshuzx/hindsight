@@ -14,6 +14,10 @@ export async function GET(request: NextRequest) {
     const offset = searchParams.get("offset") ? Number(searchParams.get("offset")) : undefined;
     const type = searchParams.get("type") || searchParams.get("fact_type") || undefined;
     const q = searchParams.get("q") || undefined;
+    const sort = searchParams.get("sort") || undefined;
+    const order = searchParams.get("order") || undefined;
+    const documentId = searchParams.get("document_id") || undefined;
+    const chunkId = searchParams.get("chunk_id") || undefined;
     const consolidationStateParam =
       searchParams.get("consolidation_state") || searchParams.get("consolidationState");
     const consolidationState =
@@ -29,6 +33,10 @@ export async function GET(request: NextRequest) {
       type,
       q,
       consolidationState,
+      sort: sort as "timeline" | undefined,
+      order: order as "asc" | "desc" | undefined,
+      documentId,
+      chunkId,
     });
 
     return NextResponse.json(response, { status: 200 });

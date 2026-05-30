@@ -4993,6 +4993,10 @@ class MemoryEngine(MemoryEngineInterface):
         fact_type: str | None = None,
         search_query: str | None = None,
         consolidation_state: str | None = None,
+        sort: str | None = None,
+        order: str | None = None,
+        document_id: str | None = None,
+        chunk_id: str | None = None,
         limit: int = 100,
         offset: int = 0,
         request_context: "RequestContext",
@@ -5009,6 +5013,12 @@ class MemoryEngine(MemoryEngineInterface):
                 'pending' (not yet consolidated, no failure), or
                 'done' (successfully consolidated). Only applies to source memory
                 types (world/experience).
+            sort: Optional sort mode. Use 'timeline' to sort by
+                COALESCE(occurred_start, mentioned_at, created_at).
+            order: Optional sort direction ('asc' or 'desc'). Timeline defaults to
+                ascending; the default recent-memory sort remains unchanged.
+            document_id: Optional document ID filter.
+            chunk_id: Optional chunk ID filter.
             limit: Maximum number of results to return
             offset: Offset for pagination
             request_context: Request context for authentication.
@@ -5045,6 +5055,16 @@ class MemoryEngine(MemoryEngineInterface):
                 query_conditions.append(f"(text ILIKE ${param_count} OR context ILIKE ${param_count})")
                 query_params.append(f"%{search_query}%")
 
+            if document_id:
+                param_count += 1
+                query_conditions.append(f"document_id = ${param_count}")
+                query_params.append(document_id)
+
+            if chunk_id:
+                param_count += 1
+                query_conditions.append(f"chunk_id = ${param_count}")
+                query_params.append(chunk_id)
+
             if consolidation_state:
                 state = consolidation_state.lower()
                 if state == "failed":
@@ -5064,6 +5084,25 @@ class MemoryEngine(MemoryEngineInterface):
                     )
 
             where_clause = "WHERE " + " AND ".join(query_conditions) if query_conditions else ""
+
+            sort_mode = sort.lower() if sort else None
+            if sort_mode and sort_mode != "timeline":
+                raise ValueError(f"Invalid sort '{sort}': expected 'timeline'.")
+
+            order_direction = order.lower() if order else ("asc" if sort_mode == "timeline" else None)
+            if order_direction and order_direction not in ("asc", "desc"):
+                raise ValueError(f"Invalid order '{order}': expected 'asc' or 'desc'.")
+
+            if sort_mode == "timeline":
+                # Timeline pagination must happen after ordering the full result set by event time.
+                # The table view keeps the legacy recent-memory ordering below.
+                direction = order_direction.upper()
+                order_by_clause = (
+                    f"ORDER BY COALESCE(occurred_start, mentioned_at, created_at) {direction}, "
+                    f"created_at {direction}, id {direction}"
+                )
+            else:
+                order_by_clause = "ORDER BY mentioned_at DESC NULLS LAST, created_at DESC"
 
             # Get total count
             count_query = f"""
@@ -5085,10 +5124,17 @@ class MemoryEngine(MemoryEngineInterface):
 
             units = await conn.fetch(
                 f"""
-                SELECT id, text, event_date, context, fact_type, mentioned_at, occurred_start, occurred_end, chunk_id, proof_count, tags, consolidated_at, consolidation_failed_at
+                SELECT id, text, event_date, context, fact_type, mentioned_at, occurred_start, occurred_end, chunk_id, proof_count, tags, consolidated_at, consolidation_failed_at, created_at,
+                       COALESCE(occurred_start, mentioned_at, created_at) AS timeline_at,
+                       (occurred_start IS NOT NULL OR mentioned_at IS NOT NULL) AS has_event_date,
+                       CASE
+                           WHEN occurred_start IS NOT NULL THEN 'occurred_start'
+                           WHEN mentioned_at IS NOT NULL THEN 'mentioned_at'
+                           ELSE 'created_at'
+                       END AS date_source
                 FROM {fq_table("memory_units")}
                 {where_clause}
-                ORDER BY mentioned_at DESC NULLS LAST, created_at DESC
+                {order_by_clause}
                 LIMIT {limit_param} OFFSET {offset_param}
             """,
                 *query_params,
@@ -5135,6 +5181,9 @@ class MemoryEngine(MemoryEngineInterface):
                         "mentioned_at": row["mentioned_at"].isoformat() if row["mentioned_at"] else None,
                         "occurred_start": row["occurred_start"].isoformat() if row["occurred_start"] else None,
                         "occurred_end": row["occurred_end"].isoformat() if row["occurred_end"] else None,
+                        "timeline_at": row["timeline_at"].isoformat() if row["timeline_at"] else None,
+                        "has_event_date": bool(row["has_event_date"]),
+                        "date_source": row["date_source"],
                         "entities": ", ".join(entities) if entities else "",
                         "chunk_id": row["chunk_id"] if row["chunk_id"] else None,
                         "proof_count": row["proof_count"] if row["proof_count"] is not None else 1,

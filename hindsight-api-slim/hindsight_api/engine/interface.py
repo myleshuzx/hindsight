@@ -275,6 +275,11 @@ class MemoryEngineInterface(ABC):
         *,
         fact_type: str | None = None,
         search_query: str | None = None,
+        consolidation_state: str | None = None,
+        sort: str | None = None,
+        order: str | None = None,
+        document_id: str | None = None,
+        chunk_id: str | None = None,
         limit: int = 100,
         offset: int = 0,
         request_context: "RequestContext",
@@ -286,6 +291,11 @@ class MemoryEngineInterface(ABC):
             bank_id: The memory bank ID.
             fact_type: Filter by fact type.
             search_query: Full-text search query.
+            consolidation_state: Optional consolidation state filter.
+            sort: Optional sort mode.
+            order: Optional sort direction.
+            document_id: Optional document ID filter.
+            chunk_id: Optional chunk ID filter.
             limit: Maximum results.
             offset: Pagination offset.
             request_context: Request context for authentication.

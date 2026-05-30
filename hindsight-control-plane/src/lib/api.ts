@@ -638,6 +638,10 @@ export class ControlPlaneClient {
       type?: string;
       q?: string;
       consolidationState?: "failed" | "pending" | "done";
+      sort?: "timeline";
+      order?: "asc" | "desc";
+      documentId?: string;
+      chunkId?: string;
       limit?: number;
       offset?: number;
     }
@@ -646,6 +650,10 @@ export class ControlPlaneClient {
     if (options?.type) params.set("type", options.type);
     if (options?.q) params.set("q", options.q);
     if (options?.consolidationState) params.set("consolidation_state", options.consolidationState);
+    if (options?.sort) params.set("sort", options.sort);
+    if (options?.order) params.set("order", options.order);
+    if (options?.documentId) params.set("document_id", options.documentId);
+    if (options?.chunkId) params.set("chunk_id", options.chunkId);
     if (options?.limit !== undefined) params.set("limit", String(options.limit));
     if (options?.offset !== undefined) params.set("offset", String(options.offset));
     return this.fetchApi<{
@@ -658,6 +666,9 @@ export class ControlPlaneClient {
         mentioned_at: string | null;
         occurred_start: string | null;
         occurred_end: string | null;
+        timeline_at: string | null;
+        has_event_date: boolean;
+        date_source: "occurred_start" | "mentioned_at" | "created_at";
         entities: string;
         chunk_id: string | null;
         proof_count: number;

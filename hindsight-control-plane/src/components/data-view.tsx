@@ -51,6 +51,17 @@ import { ScatterChart, Plus, FileText } from "lucide-react";
 type FactType = "world" | "experience" | "observation";
 type ViewMode = "graph" | "table" | "timeline" | "constellation";
 
+type TimelineMemory = {
+  id: string;
+  text: string;
+  context?: string | null;
+  entities?: string | null;
+  occurred_start?: string | null;
+  mentioned_at?: string | null;
+  timeline_at?: string | null;
+  has_event_date?: boolean;
+};
+
 interface DataViewProps {
   factType: FactType;
   documentId?: string;
@@ -80,6 +91,14 @@ export function DataView({
 
   // Fetch limit state - how many memories to load from the API
   const [fetchLimit, setFetchLimit] = useState(1000);
+  const timelinePageSize = 100;
+  const [timelineData, setTimelineData] = useState<{
+    items: TimelineMemory[];
+    total: number;
+    limit: number;
+    offset: number;
+  } | null>(null);
+  const [timelineLoading, setTimelineLoading] = useState(false);
 
   // Which timestamp drives the constellation recency color
   type RecencyBasis = "mentioned_at" | "occurred_start" | "occurred_end";
@@ -155,6 +174,35 @@ export function DataView({
       // Error toast is shown automatically by the API client interceptor
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadTimelineData = async (offset = 0, append = false) => {
+    if (!currentBank) return;
+
+    setTimelineLoading(true);
+    try {
+      const result = await client.listMemories(currentBank, {
+        type: factType,
+        q: searchQuery || undefined,
+        limit: timelinePageSize,
+        offset,
+        sort: "timeline",
+        order: "asc",
+        documentId,
+        chunkId,
+      });
+      setTimelineData((previous) => {
+        if (!append || !previous) {
+          return result;
+        }
+        return {
+          ...result,
+          items: [...previous.items, ...result.items],
+        };
+      });
+    } finally {
+      setTimelineLoading(false);
     }
   };
 
@@ -315,6 +363,9 @@ export function DataView({
     if (currentBank) {
       setCurrentPage(1);
       loadData(undefined, searchQuery || undefined, tagFilters.length > 0 ? tagFilters : undefined);
+      if (viewMode === "timeline") {
+        loadTimelineData(0, false);
+      }
     }
   };
 
@@ -322,6 +373,9 @@ export function DataView({
   useEffect(() => {
     if (currentBank) {
       loadData(undefined, searchQuery || undefined, tagFilters.length > 0 ? tagFilters : undefined);
+      if (viewMode === "timeline") {
+        loadTimelineData(0, false);
+      }
     }
   }, [tagFilters]);
 
@@ -329,8 +383,15 @@ export function DataView({
   useEffect(() => {
     if (currentBank) {
       loadData();
+      setTimelineData(null);
     }
   }, [factType, currentBank, documentId, chunkId]);
+
+  useEffect(() => {
+    if (currentBank && viewMode === "timeline") {
+      loadTimelineData(0, false);
+    }
+  }, [viewMode, currentBank, factType, documentId, chunkId]);
 
   // Enforce 50 node limit to prevent UI instability, default to 20 or max whichever is smaller
   useEffect(() => {
@@ -449,7 +510,22 @@ export function DataView({
                   </Button>
                 )}
                 <div className="text-sm text-muted-foreground">
-                  {searchQuery || tagFilters.length > 0 ? (
+                  {viewMode === "timeline" && timelineData ? (
+                    timelineData.items.length < timelineData.total ? (
+                      <span>
+                        Showing {timelineData.items.length} of {timelineData.total} total memories
+                        <button
+                          onClick={() => loadTimelineData(timelineData.items.length, true)}
+                          disabled={timelineLoading}
+                          className="ml-2 text-primary hover:underline disabled:opacity-50"
+                        >
+                          {timelineLoading ? "Loading..." : "Load more"}
+                        </button>
+                      </span>
+                    ) : (
+                      `${timelineData.total} total memories`
+                    )
+                  ) : searchQuery || tagFilters.length > 0 ? (
                     `${filteredTableRows.length} matching memories`
                   ) : data.table_rows?.length < data.total_units ? (
                     <span>
@@ -1128,9 +1204,15 @@ export function DataView({
 
           {!compactMode && viewMode === "timeline" && (
             <TimelineView
-              data={data}
-              filteredRows={filteredTableRows}
-              bankId={currentBank || undefined}
+              rows={timelineData?.items ?? []}
+              total={timelineData?.total ?? 0}
+              loading={timelineLoading}
+              hasMore={Boolean(timelineData && timelineData.items.length < timelineData.total)}
+              onLoadMore={() => {
+                if (timelineData) {
+                  loadTimelineData(timelineData.items.length, true);
+                }
+              }}
               onMemoryClick={(id) => setModalMemoryId(id)}
             />
           )}
@@ -1154,37 +1236,42 @@ export function DataView({
 type Granularity = "year" | "month" | "week" | "day";
 
 function TimelineView({
-  data,
-  filteredRows,
-  bankId,
+  rows,
+  total,
+  loading,
+  hasMore,
+  onLoadMore,
   onMemoryClick,
 }: {
-  data: any;
-  filteredRows: any[];
-  bankId?: string;
+  rows: TimelineMemory[];
+  total: number;
+  loading: boolean;
+  hasMore: boolean;
+  onLoadMore: () => void;
   onMemoryClick: (id: string) => void;
 }) {
   const [granularity, setGranularity] = useState<Granularity>("month");
   const [currentIndex, setCurrentIndex] = useState(0);
   const timelineRef = useRef<HTMLDivElement>(null);
 
-  // Filter and sort items that have occurred_start dates (using filtered data)
+  // The backend orders the full result set by timeline_at before pagination.
+  // Keep a defensive local sort for appended pages and use has_event_date only for the "without dates" count.
   const { sortedItems, itemsWithoutDates } = useMemo(() => {
-    if (!filteredRows || filteredRows.length === 0)
+    if (!rows || rows.length === 0)
       return { sortedItems: [], itemsWithoutDates: [] };
 
-    const withDates = filteredRows
-      .filter((row: any) => row.occurred_start)
+    const withDates = rows
+      .filter((row) => row.timeline_at)
       .sort((a: any, b: any) => {
-        const dateA = new Date(a.occurred_start).getTime();
-        const dateB = new Date(b.occurred_start).getTime();
+        const dateA = new Date(a.timeline_at).getTime();
+        const dateB = new Date(b.timeline_at).getTime();
         return dateA - dateB;
       });
 
-    const withoutDates = filteredRows.filter((row: any) => !row.occurred_start);
+    const withoutDates = rows.filter((row) => row.has_event_date === false);
 
     return { sortedItems: withDates, itemsWithoutDates: withoutDates };
-  }, [filteredRows]);
+  }, [rows]);
 
   // Group items by granularity
   const timelineGroups = useMemo(() => {
@@ -1231,7 +1318,7 @@ function TimelineView({
 
     const groups: { [key: string]: { items: any[]; date: Date } } = {};
     sortedItems.forEach((row: any) => {
-      const date = new Date(row.occurred_start);
+      const date = new Date(row.timeline_at);
       const key = getGroupKey(date);
       if (!groups[key]) {
         // For week, parse the start date from key
@@ -1258,8 +1345,8 @@ function TimelineView({
   // Get date range info
   const dateRange = useMemo(() => {
     if (sortedItems.length === 0) return null;
-    const first = new Date(sortedItems[0].occurred_start);
-    const last = new Date(sortedItems[sortedItems.length - 1].occurred_start);
+    const first = new Date(sortedItems[0].timeline_at as string);
+    const last = new Date(sortedItems[sortedItems.length - 1].timeline_at as string);
     return { first, last };
   }, [sortedItems]);
 
@@ -1291,9 +1378,11 @@ function TimelineView({
     return (
       <div className="flex flex-col items-center justify-center py-12">
         <Calendar className="w-12 h-12 text-muted-foreground mb-3" />
-        <div className="text-base font-medium text-foreground mb-1">No Timeline Data</div>
+        <div className="text-base font-medium text-foreground mb-1">
+          {loading ? "Loading Timeline..." : "No Timeline Data"}
+        </div>
         <div className="text-xs text-muted-foreground text-center max-w-md">
-          No memories have occurred_at dates.
+          No memories are available for the timeline.
           {itemsWithoutDates.length > 0 && (
             <span className="block mt-1">
               {itemsWithoutDates.length} memories without dates in Table View.
@@ -1330,6 +1419,7 @@ function TimelineView({
         <div className="flex items-center justify-between mb-3 gap-4">
           <div className="text-xs text-muted-foreground">
             {sortedItems.length} memories
+            {total > sortedItems.length && ` loaded of ${total}`}
             {itemsWithoutDates.length > 0 && ` · ${itemsWithoutDates.length} without dates`}
             {dateRange && (
               <span className="ml-2 text-foreground">
@@ -1447,10 +1537,10 @@ function TimelineView({
                     {/* Date & Time */}
                     <div className="w-[60px] text-right pr-3 pt-1 flex-shrink-0">
                       <div className="text-[10px] text-muted-foreground">
-                        {formatDateTime(item.occurred_start).date}
+                        {formatDateTime(item.timeline_at).date}
                       </div>
                       <div className="text-[9px] text-muted-foreground/70">
-                        {formatDateTime(item.occurred_start).time}
+                        {formatDateTime(item.timeline_at).time}
                       </div>
                     </div>
 
@@ -1472,6 +1562,9 @@ function TimelineView({
                         <p className="text-[10px] text-muted-foreground mt-1 truncate">
                           {item.context}
                         </p>
+                      )}
+                      {item.has_event_date === false && (
+                        <p className="text-[10px] text-muted-foreground mt-1">No event date</p>
                       )}
                       {item.entities && (
                         <div className="flex gap-1 mt-1 flex-wrap">
@@ -1499,6 +1592,19 @@ function TimelineView({
               </div>
             </div>
           ))}
+          {hasMore && (
+            <div className="pl-[75px] pt-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onLoadMore}
+                disabled={loading}
+                className="h-8 text-xs"
+              >
+                {loading ? "Loading..." : "Load more"}
+              </Button>
+            </div>
+          )}
         </div>
       </div>
     </div>

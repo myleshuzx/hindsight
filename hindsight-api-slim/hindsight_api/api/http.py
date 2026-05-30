@@ -3016,7 +3016,7 @@ def _register_routes(app: FastAPI):
         "/v1/default/banks/{bank_id}/memories/list",
         response_model=ListMemoryUnitsResponse,
         summary="List memory units",
-        description="List memory units with pagination and optional full-text search. Supports filtering by type. Results are sorted by most recent first (mentioned_at DESC, then created_at DESC).",
+        description="List memory units with pagination and optional full-text search. Supports filtering by type. Results are sorted by most recent first (mentioned_at DESC, then created_at DESC) unless sort=timeline is requested.",
         operation_id="list_memories",
         tags=["Memory"],
     )
@@ -3025,6 +3025,10 @@ def _register_routes(app: FastAPI):
         type: str | None = None,
         q: str | None = None,
         consolidation_state: str | None = None,
+        sort: str | None = None,
+        order: str | None = None,
+        document_id: str | None = None,
+        chunk_id: str | None = None,
         limit: int = 100,
         offset: int = 0,
         request_context: RequestContext = Depends(get_request_context),
@@ -3041,6 +3045,10 @@ def _register_routes(app: FastAPI):
             q: Search query for full-text search (searches text and context)
             consolidation_state: Filter by consolidation state for source memories
                 (world/experience). One of 'failed', 'pending', or 'done'.
+            sort: Optional sort mode. Use 'timeline' for event timeline ordering.
+            order: Optional sort direction. Supports 'asc' or 'desc'. Timeline defaults to 'asc'.
+            document_id: Optional document ID filter.
+            chunk_id: Optional chunk ID filter.
             limit: Maximum number of results (default: 100)
             offset: Offset for pagination (default: 0)
         """
@@ -3050,6 +3058,10 @@ def _register_routes(app: FastAPI):
                 fact_type=type,
                 search_query=q,
                 consolidation_state=consolidation_state,
+                sort=sort,
+                order=order,
+                document_id=document_id,
+                chunk_id=chunk_id,
                 limit=limit,
                 offset=offset,
                 request_context=request_context,
