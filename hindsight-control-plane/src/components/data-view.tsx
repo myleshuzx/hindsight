@@ -513,12 +513,16 @@ export function DataView({
                   </Button>
                 )}
                 <div className="text-sm text-muted-foreground">
-                  {viewMode === "timeline" && timelineData ? (
-                    <span>
-                      Page {timelinePage} /{" "}
-                      {Math.max(1, Math.ceil(timelineData.total / timelinePageSize))} -{" "}
-                      {timelineData.total} total memories
-                    </span>
+                  {viewMode === "timeline" ? (
+                    timelineData ? (
+                      <span>
+                        Page {timelinePage} /{" "}
+                        {Math.max(1, Math.ceil(timelineData.total / timelinePageSize))} -{" "}
+                        {timelineData.total} total memories
+                      </span>
+                    ) : (
+                      <span>{timelineLoading ? "Loading timeline..." : "0 total memories"}</span>
+                    )
                   ) : searchQuery || tagFilters.length > 0 ? (
                     `${filteredTableRows.length} matching memories`
                   ) : data.table_rows?.length < data.total_units ? (
