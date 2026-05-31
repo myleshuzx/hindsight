@@ -99,6 +99,7 @@ export function DataView({
     offset: number;
   } | null>(null);
   const [timelineLoading, setTimelineLoading] = useState(false);
+  const [timelinePage, setTimelinePage] = useState(1);
 
   // Which timestamp drives the constellation recency color
   type RecencyBasis = "mentioned_at" | "occurred_start" | "occurred_end";
@@ -177,7 +178,7 @@ export function DataView({
     }
   };
 
-  const loadTimelineData = async (offset = 0, append = false) => {
+  const loadTimelineData = async (offset = 0) => {
     if (!currentBank) return;
 
     setTimelineLoading(true);
@@ -192,15 +193,8 @@ export function DataView({
         documentId,
         chunkId,
       });
-      setTimelineData((previous) => {
-        if (!append || !previous) {
-          return result;
-        }
-        return {
-          ...result,
-          items: [...previous.items, ...result.items],
-        };
-      });
+      setTimelineData(result);
+      setTimelinePage(Math.floor(offset / timelinePageSize) + 1);
     } finally {
       setTimelineLoading(false);
     }
@@ -364,7 +358,7 @@ export function DataView({
       setCurrentPage(1);
       loadData(undefined, searchQuery || undefined, tagFilters.length > 0 ? tagFilters : undefined);
       if (viewMode === "timeline") {
-        loadTimelineData(0, false);
+        loadTimelineData(0);
       }
     }
   };
@@ -374,7 +368,7 @@ export function DataView({
     if (currentBank) {
       loadData(undefined, searchQuery || undefined, tagFilters.length > 0 ? tagFilters : undefined);
       if (viewMode === "timeline") {
-        loadTimelineData(0, false);
+        loadTimelineData(0);
       }
     }
   }, [tagFilters]);
@@ -384,12 +378,13 @@ export function DataView({
     if (currentBank) {
       loadData();
       setTimelineData(null);
+      setTimelinePage(1);
     }
   }, [factType, currentBank, documentId, chunkId]);
 
   useEffect(() => {
     if (currentBank && viewMode === "timeline") {
-      loadTimelineData(0, false);
+      loadTimelineData(0);
     }
   }, [viewMode, currentBank, factType, documentId, chunkId]);
 
@@ -511,20 +506,11 @@ export function DataView({
                 )}
                 <div className="text-sm text-muted-foreground">
                   {viewMode === "timeline" && timelineData ? (
-                    timelineData.items.length < timelineData.total ? (
-                      <span>
-                        Showing {timelineData.items.length} of {timelineData.total} total memories
-                        <button
-                          onClick={() => loadTimelineData(timelineData.items.length, true)}
-                          disabled={timelineLoading}
-                          className="ml-2 text-primary hover:underline disabled:opacity-50"
-                        >
-                          {timelineLoading ? "Loading..." : "Load more"}
-                        </button>
-                      </span>
-                    ) : (
-                      `${timelineData.total} total memories`
-                    )
+                    <span>
+                      Page {timelinePage} /{" "}
+                      {Math.max(1, Math.ceil(timelineData.total / timelinePageSize))} -{" "}
+                      {timelineData.total} total memories
+                    </span>
                   ) : searchQuery || tagFilters.length > 0 ? (
                     `${filteredTableRows.length} matching memories`
                   ) : data.table_rows?.length < data.total_units ? (
@@ -1207,11 +1193,12 @@ export function DataView({
               rows={timelineData?.items ?? []}
               total={timelineData?.total ?? 0}
               loading={timelineLoading}
-              hasMore={Boolean(timelineData && timelineData.items.length < timelineData.total)}
-              onLoadMore={() => {
-                if (timelineData) {
-                  loadTimelineData(timelineData.items.length, true);
-                }
+              page={timelinePage}
+              totalPages={
+                timelineData ? Math.max(1, Math.ceil(timelineData.total / timelinePageSize)) : 1
+              }
+              onPageChange={(page) => {
+                loadTimelineData((page - 1) * timelinePageSize);
               }}
               onMemoryClick={(id) => setModalMemoryId(id)}
             />
@@ -1239,23 +1226,28 @@ function TimelineView({
   rows,
   total,
   loading,
-  hasMore,
-  onLoadMore,
+  page,
+  totalPages,
+  onPageChange,
   onMemoryClick,
 }: {
   rows: TimelineMemory[];
   total: number;
   loading: boolean;
-  hasMore: boolean;
-  onLoadMore: () => void;
+  page: number;
+  totalPages: number;
+  onPageChange: (page: number) => void;
   onMemoryClick: (id: string) => void;
 }) {
   const [granularity, setGranularity] = useState<Granularity>("month");
-  const [currentIndex, setCurrentIndex] = useState(0);
   const timelineRef = useRef<HTMLDivElement>(null);
 
+  useEffect(() => {
+    timelineRef.current?.scrollTo({ top: 0 });
+  }, [page]);
+
   // The backend orders the full result set by timeline_at before pagination.
-  // Keep a defensive local sort for appended pages and use has_event_date only for the "without dates" count.
+  // Keep a defensive local sort for the current page and use has_event_date only for the "without dates" count.
   const { sortedItems, itemsWithoutDates } = useMemo(() => {
     if (!rows || rows.length === 0)
       return { sortedItems: [], itemsWithoutDates: [] };
@@ -1349,14 +1341,6 @@ function TimelineView({
     const last = new Date(sortedItems[sortedItems.length - 1].timeline_at as string);
     return { first, last };
   }, [sortedItems]);
-
-  // Navigation
-  const scrollToGroup = (index: number) => {
-    const clampedIndex = Math.max(0, Math.min(index, timelineGroups.length - 1));
-    setCurrentIndex(clampedIndex);
-    const element = document.getElementById(`timeline-group-${clampedIndex}`);
-    element?.scrollIntoView({ behavior: "smooth", block: "start" });
-  };
 
   const zoomIn = () => {
     const levels: Granularity[] = ["year", "month", "week", "day"];
@@ -1462,8 +1446,8 @@ function TimelineView({
               <Button
                 variant="secondary"
                 size="sm"
-                onClick={() => scrollToGroup(0)}
-                disabled={timelineGroups.length <= 1}
+                onClick={() => onPageChange(1)}
+                disabled={page <= 1 || loading}
                 className="h-7 w-7 p-0"
                 title="First"
               >
@@ -1472,21 +1456,21 @@ function TimelineView({
               <Button
                 variant="secondary"
                 size="sm"
-                onClick={() => scrollToGroup(currentIndex - 1)}
-                disabled={currentIndex === 0}
+                onClick={() => onPageChange(page - 1)}
+                disabled={page <= 1 || loading}
                 className="h-7 w-7 p-0"
                 title="Previous"
               >
                 <ChevronLeft className="h-3 w-3" />
               </Button>
               <span className="text-[10px] px-2 min-w-[60px] text-center border-x border-border text-foreground">
-                {currentIndex + 1} / {timelineGroups.length}
+                {page} / {totalPages}
               </span>
               <Button
                 variant="secondary"
                 size="sm"
-                onClick={() => scrollToGroup(currentIndex + 1)}
-                disabled={currentIndex >= timelineGroups.length - 1}
+                onClick={() => onPageChange(page + 1)}
+                disabled={page >= totalPages || loading}
                 className="h-7 w-7 p-0"
                 title="Next"
               >
@@ -1495,8 +1479,8 @@ function TimelineView({
               <Button
                 variant="secondary"
                 size="sm"
-                onClick={() => scrollToGroup(timelineGroups.length - 1)}
-                disabled={timelineGroups.length <= 1}
+                onClick={() => onPageChange(totalPages)}
+                disabled={page >= totalPages || loading}
                 className="h-7 w-7 p-0"
                 title="Last"
               >
@@ -1514,8 +1498,7 @@ function TimelineView({
             <div key={group.key} id={`timeline-group-${groupIdx}`} className="mb-4">
               {/* Group header */}
               <div
-                className="flex items-center mb-2 cursor-pointer hover:opacity-80"
-                onClick={() => setCurrentIndex(groupIdx)}
+                className="flex items-center mb-2"
               >
                 <div className="w-[60px] text-right pr-3">
                   <span className="text-xs font-semibold text-primary">{group.label}</span>
@@ -1592,19 +1575,6 @@ function TimelineView({
               </div>
             </div>
           ))}
-          {hasMore && (
-            <div className="pl-[75px] pt-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={onLoadMore}
-                disabled={loading}
-                className="h-8 text-xs"
-              >
-                {loading ? "Loading..." : "Load more"}
-              </Button>
-            </div>
-          )}
         </div>
       </div>
     </div>
