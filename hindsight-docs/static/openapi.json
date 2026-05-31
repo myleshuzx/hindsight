@@ -243,7 +243,7 @@
           "Memory"
         ],
         "summary": "List memory units",
-        "description": "List memory units with pagination and optional full-text search. Supports filtering by type. Results are sorted by most recent first (mentioned_at DESC, then created_at DESC).",
+        "description": "List memory units with pagination and optional full-text search. Supports filtering by type. Results are sorted by most recent first (mentioned_at DESC, then created_at DESC) unless sort=timeline is requested.",
         "operationId": "list_memories",
         "parameters": [
           {
@@ -301,6 +301,70 @@
                 }
               ],
               "title": "Consolidation State"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Sort"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Order"
+            }
+          },
+          {
+            "name": "document_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Document Id"
+            }
+          },
+          {
+            "name": "chunk_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Chunk Id"
             }
           },
           {
@@ -4612,7 +4676,7 @@
           "Files"
         ],
         "summary": "Convert files to memories",
-        "description": "Upload files (PDF, DOCX, etc.), convert them to markdown, and retain as memories.\n\nThis endpoint handles file upload, conversion, and memory creation in a single operation.\n\n**Features:**\n- Supports PDF, DOCX, PPTX, XLSX, images (with OCR), audio (with transcription)\n- Automatic file-to-markdown conversion using pluggable parsers\n- Files stored in object storage (PostgreSQL by default, S3 for production)\n- Each file becomes a separate document with optional metadata/tags\n- Always processes asynchronously \u2014 returns operation IDs immediately\n\n**The system automatically:**\n1. Stores uploaded files in object storage\n2. Converts files to markdown\n3. Creates document records with file metadata\n4. Extracts facts and creates memory units (same as regular retain)\n\nUse the operations endpoint to monitor progress.\n\n**Request format:** multipart/form-data with:\n- `files`: One or more files to upload\n- `request`: JSON string with FileRetainRequest model\n\n**Parser selection:**\n- Set `parser` in the request body to override the server default for all files.\n- Set `parser` inside a `files_metadata` entry for per-file control.\n- Pass a list (e.g. `['iris', 'markitdown']`) to define an ordered fallback chain \u2014 each parser is tried in sequence until one succeeds.\n- Falls back to the server default (`HINDSIGHT_API_FILE_PARSER`) if not specified.\n- Only parsers enabled on the server may be requested; others return HTTP 400.",
+        "description": "Upload files (PDF, DOCX, etc.), convert them to markdown, and retain as memories.\n\nThis endpoint handles file upload, conversion, and memory creation in a single operation.\n\n**Features:**\n- Supports PDF, DOCX, PPTX, XLSX, images (with OCR), audio (with transcription)\n- Automatic file-to-markdown conversion using pluggable parsers\n- Files stored in object storage (PostgreSQL by default, S3 for production)\n- Each file becomes a separate document with optional metadata/tags\n- Always processes asynchronously \u2014 returns operation IDs immediately\n\n**The system automatically:**\n1. Stores uploaded files in object storage\n2. Converts files to markdown\n3. Creates document records with file metadata\n4. Extracts facts and creates memory units (same as regular retain)\n\nUse the operations endpoint to monitor progress.\n\n**Request format:** multipart/form-data with:\n- `files`: One or more files to upload\n- `request`: Optional JSON string with FileRetainRequest model (legacy clients)\n- `files_metadata`: Optional JSON array of per-file FileRetainMetadata entries\n- `parser`: Optional default parser or JSON parser array for all files\n\n**Parser selection:**\n- Set `parser` as a form field or in the request body to override the server default for all files.\n- Set `parser` inside a `files_metadata` entry for per-file control.\n- Pass a list (e.g. `['iris', 'markitdown']`) to define an ordered fallback chain \u2014 each parser is tried in sequence until one succeeds.\n- Falls back to the server default (`HINDSIGHT_API_FILE_PARSER`) if not specified.\n- Only parsers enabled on the server may be requested; others return HTTP 400.",
         "operationId": "file_retain",
         "parameters": [
           {
@@ -6242,15 +6306,47 @@
             "description": "Files to upload and convert"
           },
           "request": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Request",
-            "description": "JSON string with FileRetainRequest model"
+            "description": "Optional JSON string with FileRetainRequest model",
+            "contentMediaType": "application/json",
+            "x-json-schema-ref": "#/components/schemas/FileRetainRequest"
+          },
+          "files_metadata": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Files Metadata",
+            "description": "Optional JSON array of FileRetainMetadata objects"
+          },
+          "parser": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parser",
+            "description": "Optional default parser name or JSON parser array"
           }
         },
         "type": "object",
         "required": [
-          "files",
-          "request"
+          "files"
         ],
         "title": "Body_file_retain"
       },
@@ -11020,6 +11116,242 @@
         ],
         "title": "WebhookResponse",
         "description": "Response model for a webhook."
+      },
+      "FileRetainMetadata": {
+        "description": "Metadata for a single file in file retain request.",
+        "properties": {
+          "document_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Document ID (auto-generated if not provided)",
+            "title": "Document Id"
+          },
+          "context": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Context for the file",
+            "title": "Context"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Additional metadata",
+            "title": "Metadata"
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Tags for this file",
+            "title": "Tags"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "ISO timestamp",
+            "title": "Timestamp"
+          },
+          "parser": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Parser or ordered fallback chain for this file (overrides request-level parser). E.g. 'iris' or ['iris', 'markitdown'].",
+            "title": "Parser"
+          },
+          "strategy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Named retain strategy for this file. Overrides the bank's default strategy. Strategies are defined in the bank config under 'retain_strategies'.",
+            "title": "Strategy"
+          },
+          "entities": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/EntityInput"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional entities to combine with auto-extracted entities for this file.",
+            "title": "Entities"
+          },
+          "update_mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "replace",
+                  "append"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "How to handle an existing document with the same document_id for this file. 'replace' deletes old data and reprocesses from scratch. 'append' concatenates new content to the existing document text and reprocesses. Omit to preserve the default file retain behavior.",
+            "title": "Update Mode"
+          },
+          "observation_scopes": {
+            "anyOf": [
+              {
+                "enum": [
+                  "per_tag",
+                  "combined",
+                  "all_combinations"
+                ],
+                "type": "string"
+              },
+              {
+                "items": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "How to scope observations during consolidation for this file.",
+            "title": "ObservationScopes"
+          }
+        },
+        "title": "FileRetainMetadata",
+        "type": "object"
+      },
+      "FileRetainRequest": {
+        "description": "Request model for file retain endpoint.",
+        "example": {
+          "files_metadata": [
+            {
+              "document_id": "report_2024",
+              "entities": [
+                {
+                  "text": "Alice",
+                  "type": "PERSON"
+                }
+              ],
+              "observation_scopes": "combined",
+              "tags": [
+                "quarterly"
+              ],
+              "update_mode": "replace"
+            },
+            {
+              "context": "meeting notes",
+              "parser": [
+                "iris",
+                "markitdown"
+              ]
+            }
+          ],
+          "parser": "iris"
+        },
+        "properties": {
+          "parser": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Default parser or ordered fallback chain for all files in this request. E.g. 'markitdown' or ['iris', 'markitdown']. Falls back to server default if not set. Per-file 'parser' in files_metadata takes precedence over this value.",
+            "title": "Parser"
+          },
+          "files_metadata": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/FileRetainMetadata"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Metadata for each file (optional, must match number of files if provided)",
+            "title": "Files Metadata"
+          }
+        },
+        "title": "FileRetainRequest",
+        "type": "object"
       }
     }
   }

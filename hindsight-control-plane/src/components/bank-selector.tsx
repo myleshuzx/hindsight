@@ -67,6 +67,24 @@ function toIsoTimestamp(value: string): string {
   return value.includes("T") ? value : `${value}T00:00:00`;
 }
 
+type UploadObservationScopes = "per_tag" | "combined" | "all_combinations" | string[][];
+
+type FileMetadataForm = {
+  context: string;
+  timestamp: string;
+  document_id: string;
+  tags: string;
+  metadata: string;
+  parser: string;
+  strategy: string;
+  entities: string;
+  observation_scopes: "" | "per_tag" | "combined" | "all_combinations" | "custom";
+  observation_scopes_custom: string;
+  update_mode: "" | "replace" | "append";
+  advancedTab: "document" | "tags" | "source" | "retain";
+  expanded: boolean;
+};
+
 function formatTimeAgo(isoDate: string): string {
   const diff = Date.now() - new Date(isoDate).getTime();
   const seconds = Math.floor(diff / 1000);
@@ -134,16 +152,7 @@ function BankSelectorInner() {
   // File upload state
   const [selectedFiles, setSelectedFiles] = React.useState<File[]>([]);
   const [filesMetadata, setFilesMetadata] = React.useState<
-    {
-      context: string;
-      timestamp: string;
-      document_id: string;
-      tags: string;
-      metadata: string;
-      strategy: string;
-      advancedTab: "document" | "tags" | "source";
-      expanded: boolean;
-    }[]
+    FileMetadataForm[]
   >([]);
   const [uploadProgress, setUploadProgress] = React.useState<string>("");
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -247,6 +256,59 @@ function BankSelectorInner() {
     return items.map((t) => ({ text: t }));
   };
 
+  const parseUploadMetadata = (s: string): Record<string, unknown> | undefined => {
+    if (!s.trim()) return undefined;
+    const parsed = JSON.parse(s);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Metadata must be a JSON object.");
+    }
+    return parsed as Record<string, unknown>;
+  };
+
+  const parseUploadTags = (s: string): string[] | undefined => {
+    if (!s.trim()) return undefined;
+    const trimmed = s.trim();
+    const parsed = trimmed.startsWith("[") ? JSON.parse(trimmed) : trimmed.split(",");
+    if (!Array.isArray(parsed) || parsed.some((tag) => typeof tag !== "string")) {
+      throw new Error("Tags must be comma-separated text or a JSON string array.");
+    }
+    const tags = parsed.map((tag) => tag.trim()).filter(Boolean);
+    return tags.length > 0 ? tags : undefined;
+  };
+
+  const parseUploadEntities = (s: string): Array<{ text: string; type?: string }> | undefined => {
+    if (!s.trim()) return undefined;
+    const parsed = JSON.parse(s);
+    if (!Array.isArray(parsed)) {
+      throw new Error("Entities must be a JSON array.");
+    }
+    for (const entity of parsed) {
+      if (!entity || typeof entity !== "object" || typeof entity.text !== "string") {
+        throw new Error("Each entity must be an object with a text string.");
+      }
+      if ("type" in entity && entity.type !== undefined && typeof entity.type !== "string") {
+        throw new Error("Entity type must be a string when provided.");
+      }
+    }
+    return parsed as Array<{ text: string; type?: string }>;
+  };
+
+  const parseUploadObservationScopes = (meta: FileMetadataForm): UploadObservationScopes | undefined => {
+    if (!meta.observation_scopes) return undefined;
+    if (meta.observation_scopes !== "custom") return meta.observation_scopes;
+    if (!meta.observation_scopes_custom.trim()) return undefined;
+    const parsed = JSON.parse(meta.observation_scopes_custom);
+    if (
+      !Array.isArray(parsed) ||
+      parsed.some(
+        (scope) => !Array.isArray(scope) || scope.some((tag) => typeof tag !== "string")
+      )
+    ) {
+      throw new Error("Custom observation scopes must be a JSON array of string arrays.");
+    }
+    return parsed as string[][];
+  };
+
   const scopeLabel = (tags: string[]) => tags.join(", ");
 
   const scopeQuestion = (tags: string[]): string => {
@@ -277,21 +339,26 @@ function BankSelectorInner() {
     return result;
   };
 
-  const emptyFileMeta = (documentId = "") => ({
+  const emptyFileMeta = (): FileMetadataForm => ({
     context: "",
     timestamp: "",
-    document_id: documentId,
+    document_id: "",
     tags: "",
     metadata: "",
+    parser: "",
     strategy: "",
-    advancedTab: "document" as "document" | "tags" | "source",
+    entities: "",
+    observation_scopes: "",
+    observation_scopes_custom: "",
+    update_mode: "",
+    advancedTab: "document",
     expanded: false,
   });
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     setSelectedFiles((prev) => [...prev, ...files]);
-    setFilesMetadata((prev) => [...prev, ...files.map((f) => emptyFileMeta(f.name))]);
+    setFilesMetadata((prev) => [...prev, ...files.map(() => emptyFileMeta())]);
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
@@ -310,7 +377,12 @@ function BankSelectorInner() {
       | "document_id"
       | "tags"
       | "metadata"
+      | "parser"
       | "strategy"
+      | "entities"
+      | "observation_scopes"
+      | "observation_scopes_custom"
+      | "update_mode"
       | "advancedTab",
     value: string
   ) => {
@@ -332,19 +404,41 @@ function BankSelectorInner() {
     try {
       setUploadProgress(`Uploading ${selectedFiles.length} file(s)...`);
 
-      const perFileMeta = filesMetadata.map((meta) => ({
-        ...(meta.context && { context: meta.context }),
-        ...(meta.timestamp && { timestamp: toIsoTimestamp(meta.timestamp) }),
-        ...(meta.document_id && { document_id: meta.document_id }),
-        ...(meta.tags && {
-          tags: meta.tags
-            .split(",")
-            .map((t) => t.trim())
-            .filter(Boolean),
-        }),
-        ...(meta.metadata && { metadata: parseMetadata(meta.metadata) }),
-        ...(meta.strategy && { strategy: meta.strategy }),
-      }));
+      const perFileMeta = filesMetadata.map((meta, index) => {
+        try {
+          const item: {
+            context?: string;
+            timestamp?: string;
+            document_id?: string;
+            tags?: string[];
+            metadata?: Record<string, unknown>;
+            parser?: string;
+            strategy?: string;
+            entities?: Array<{ text: string; type?: string }>;
+            observation_scopes?: UploadObservationScopes;
+            update_mode?: "replace" | "append";
+          } = {};
+          const metadata = parseUploadMetadata(meta.metadata);
+          const tags = parseUploadTags(meta.tags);
+          const entities = parseUploadEntities(meta.entities);
+          const observationScopes = parseUploadObservationScopes(meta);
+
+          if (meta.context.trim()) item.context = meta.context.trim();
+          if (meta.timestamp.trim()) item.timestamp = toIsoTimestamp(meta.timestamp.trim());
+          if (meta.document_id.trim()) item.document_id = meta.document_id.trim();
+          if (tags) item.tags = tags;
+          if (metadata) item.metadata = metadata;
+          if (meta.parser.trim()) item.parser = meta.parser.trim();
+          if (meta.strategy.trim()) item.strategy = meta.strategy.trim();
+          if (entities) item.entities = entities;
+          if (observationScopes) item.observation_scopes = observationScopes;
+          if (meta.update_mode) item.update_mode = meta.update_mode;
+          return item;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Invalid upload metadata.";
+          throw new Error(`${selectedFiles[index]?.name ?? `File ${index + 1}`}: ${message}`);
+        }
+      });
 
       await client.uploadFiles({
         bank_id: currentBank,
@@ -363,11 +457,10 @@ function BankSelectorInner() {
 
       // Navigate to documents view
       router.push(bankRoute(currentBank!, "?view=documents"));
-    } catch {
-      // Error toast is shown automatically by the API client interceptor
+    } catch (error) {
+      setUploadProgress(error instanceof Error ? error.message : "Failed to upload files");
     } finally {
       setIsCreatingDoc(false);
-      setUploadProgress("");
     }
   };
 
@@ -807,15 +900,28 @@ function BankSelectorInner() {
 
                       {selectedFiles.length > 0 && (
                         <div className="mt-3 space-y-1">
+                          <div className="flex items-center justify-between px-1">
+                            <span className="text-sm font-semibold text-foreground">
+                              Advanced Metadata
+                            </span>
+                            <span className="text-xs text-muted-foreground">
+                              {selectedFiles.length} file{selectedFiles.length === 1 ? "" : "s"}
+                            </span>
+                          </div>
                           {selectedFiles.map((file, index) => {
                             const meta = filesMetadata[index];
                             const hasData =
-                              meta &&
+                                meta &&
                               (meta.context ||
                                 meta.timestamp ||
                                 meta.document_id ||
                                 meta.tags ||
-                                meta.metadata);
+                                meta.metadata ||
+                                meta.parser ||
+                                meta.strategy ||
+                                meta.entities ||
+                                meta.observation_scopes_custom ||
+                                meta.update_mode);
                             return (
                               <div
                                 key={`${file.name}-${index}`}
@@ -860,7 +966,7 @@ function BankSelectorInner() {
                                       onValueChange={(v) => updateFileMeta(index, "advancedTab", v)}
                                     >
                                       <TabsList className="w-full border-b border-border bg-transparent h-8 p-0 gap-0 justify-start rounded-none">
-                                        {(["document", "tags", "source"] as const).map((t) => (
+                                        {(["document", "tags", "source", "retain"] as const).map((t) => (
                                           <TabsTrigger
                                             key={t}
                                             value={t}
@@ -878,11 +984,12 @@ function BankSelectorInner() {
                                                 Event Date
                                               </label>
                                               <Input
-                                                type="date"
+                                                type="text"
                                                 value={meta.timestamp}
                                                 onChange={(e) =>
                                                   updateFileMeta(index, "timestamp", e.target.value)
                                                 }
+                                                placeholder="2008-06-14T00:00:00+08:00"
                                                 className="h-8 text-sm text-foreground"
                                               />
                                             </div>
@@ -903,6 +1010,47 @@ function BankSelectorInner() {
                                                 className="h-8 text-sm"
                                               />
                                             </div>
+                                          </div>
+                                          <div>
+                                            <label className="font-bold block mb-1 text-sm text-foreground">
+                                              Update Mode
+                                            </label>
+                                            <Select
+                                              value={meta.update_mode || "__none__"}
+                                              onValueChange={(v) =>
+                                                updateFileMeta(
+                                                  index,
+                                                  "update_mode",
+                                                  v === "__none__" ? "" : v
+                                                )
+                                              }
+                                            >
+                                              <SelectTrigger className="w-full h-8 text-sm">
+                                                <SelectValue />
+                                              </SelectTrigger>
+                                              <SelectContent>
+                                                <SelectItem value="__none__">
+                                                  <span className="text-muted-foreground italic">
+                                                    Default
+                                                  </span>
+                                                </SelectItem>
+                                                <SelectItem value="replace">replace</SelectItem>
+                                                <SelectItem value="append">append</SelectItem>
+                                              </SelectContent>
+                                            </Select>
+                                          </div>
+                                          <div>
+                                            <label className="font-bold block mb-1 text-sm text-foreground">
+                                              Parser
+                                            </label>
+                                            <Input
+                                              value={meta.parser}
+                                              onChange={(e) =>
+                                                updateFileMeta(index, "parser", e.target.value)
+                                              }
+                                              placeholder="Optional parser..."
+                                              className="h-8 text-sm"
+                                            />
                                           </div>
                                           <div>
                                             <label className="font-bold block mb-1 text-sm text-foreground">
@@ -957,7 +1105,7 @@ function BankSelectorInner() {
                                               onChange={(e) =>
                                                 updateFileMeta(index, "tags", e.target.value)
                                               }
-                                              placeholder="tag1, tag2..."
+                                              placeholder={'diary, year:2008 or ["diary","year:2008"]'}
                                               className="h-8 text-sm"
                                             />
                                             <p className="text-xs text-muted-foreground mt-1">
@@ -989,10 +1137,75 @@ function BankSelectorInner() {
                                               onChange={(e) =>
                                                 updateFileMeta(index, "metadata", e.target.value)
                                               }
-                                              placeholder={"source: slack\nchannel: engineering"}
-                                              className="min-h-[52px] resize-y font-mono text-sm"
+                                              placeholder={
+                                                '{\n  "source": "diary",\n  "timezone": "Asia/Shanghai"\n}'
+                                              }
+                                              className="min-h-[96px] resize-y font-mono text-sm"
                                             />
                                           </div>
+                                        </TabsContent>
+                                        <TabsContent value="retain" className="mt-0 space-y-2">
+                                          <div>
+                                            <label className="font-bold block mb-1 text-sm text-foreground">
+                                              Entities
+                                            </label>
+                                            <Textarea
+                                              value={meta.entities}
+                                              onChange={(e) =>
+                                                updateFileMeta(index, "entities", e.target.value)
+                                              }
+                                              placeholder={
+                                                '[{"text":"用户","type":"PERSON"},{"text":"Wi-Fi","type":"CONCEPT"}]'
+                                              }
+                                              className="min-h-[72px] resize-y font-mono text-sm"
+                                            />
+                                          </div>
+                                          <div>
+                                            <label className="font-bold block mb-1 text-sm text-foreground">
+                                              Observation Scopes
+                                            </label>
+                                            <Select
+                                              value={meta.observation_scopes || "__none__"}
+                                              onValueChange={(v) =>
+                                                updateFileMeta(
+                                                  index,
+                                                  "observation_scopes",
+                                                  v === "__none__" ? "" : v
+                                                )
+                                              }
+                                            >
+                                              <SelectTrigger className="w-full h-8 text-sm">
+                                                <SelectValue />
+                                              </SelectTrigger>
+                                              <SelectContent>
+                                                <SelectItem value="__none__">
+                                                  <span className="text-muted-foreground italic">
+                                                    Default
+                                                  </span>
+                                                </SelectItem>
+                                                <SelectItem value="combined">combined</SelectItem>
+                                                <SelectItem value="per_tag">per_tag</SelectItem>
+                                                <SelectItem value="all_combinations">
+                                                  all_combinations
+                                                </SelectItem>
+                                                <SelectItem value="custom">custom JSON</SelectItem>
+                                              </SelectContent>
+                                            </Select>
+                                          </div>
+                                          {meta.observation_scopes === "custom" && (
+                                            <Textarea
+                                              value={meta.observation_scopes_custom}
+                                              onChange={(e) =>
+                                                updateFileMeta(
+                                                  index,
+                                                  "observation_scopes_custom",
+                                                  e.target.value
+                                                )
+                                              }
+                                              placeholder={'[["diary"],["year:2008","month:2008-06"]]'}
+                                              className="min-h-[72px] resize-y font-mono text-sm"
+                                            />
+                                          )}
                                         </TabsContent>
                                       </div>
                                     </Tabs>

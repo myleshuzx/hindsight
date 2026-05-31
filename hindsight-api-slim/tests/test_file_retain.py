@@ -237,7 +237,7 @@ async def test_file_retain_validation_errors(memory_no_llm_verify):
             data=data,
         )
 
-        assert response.status_code == 400
+        assert response.status_code == 422
         assert "files_metadata count" in response.json()["detail"]
 
 
@@ -729,6 +729,94 @@ async def test_file_retain_forwards_all_content_fields(memory_no_llm_verify, sam
         assert content["tags"] == ["report", "q1"]
         # content is the converted markdown (raw bytes decoded by NoopParser).
         assert content["content"] == sample_txt_content.decode("utf-8")
+    finally:
+        memory._task_backend.submit_task = original_submit
+
+
+@pytest.mark.asyncio
+async def test_file_retain_forwards_advanced_metadata_to_retain(memory_no_llm_verify, sample_txt_content):
+    """File retain must pass advanced per-file metadata into the normal retain item."""
+    from hindsight_api.engine.parsers.base import FileParser
+    from hindsight_api.models import RequestContext
+
+    memory = memory_no_llm_verify
+
+    class NoopParser(FileParser):
+        async def convert(self, file_data: bytes, filename: str) -> str:
+            return file_data.decode("utf-8")
+
+        def supports(self, filename: str, content_type: str | None = None) -> bool:
+            return filename.endswith(".txt")
+
+        def name(self) -> str:
+            return "advanced_metadata_parser"
+
+    memory._parser_registry.register(NoopParser())
+
+    class MockFile:
+        def __init__(self, content, filename, content_type):
+            self.content = content
+            self.filename = filename
+            self.content_type = content_type
+
+        async def read(self):
+            return self.content
+
+    original_submit = memory._task_backend.submit_task
+    captured: list[dict] = []
+
+    async def capturing_submit(task_dict):
+        if task_dict.get("type") == "batch_retain":
+            captured.append(task_dict)
+            return
+        await original_submit(task_dict)
+
+    memory._task_backend.submit_task = capturing_submit
+    try:
+        request_context = RequestContext(internal=True)
+        bank_id = f"test_file_advanced_meta_{datetime.now(timezone.utc).timestamp()}"
+        await memory.get_bank_profile(bank_id, request_context=request_context)
+
+        await memory.submit_async_file_retain(
+            bank_id=bank_id,
+            file_items=[
+                {
+                    "file": MockFile(sample_txt_content, "doc.txt", "text/plain"),
+                    "document_id": "diary-2008-06-14",
+                    "context": "personal diary entry",
+                    "metadata": {
+                        "source": "diary",
+                        "filename": "diary-2008-06-14.md",
+                        "timezone": "Asia/Shanghai",
+                    },
+                    "tags": ["diary", "year:2008", "month:2008-06"],
+                    "timestamp": "2008-06-14T00:00:00+08:00",
+                    "parser": ["advanced_metadata_parser"],
+                    "strategy": "diary_strategy",
+                    "entities": [{"text": "用户", "type": "PERSON"}],
+                    "observation_scopes": "combined",
+                    "update_mode": "replace",
+                }
+            ],
+            document_tags=None,
+            request_context=request_context,
+        )
+
+        assert len(captured) == 1
+        content = captured[0]["contents"][0]
+        assert content["document_id"] == "diary-2008-06-14"
+        assert content["event_date"] == "2008-06-14T00:00:00+08:00"
+        assert content["context"] == "personal diary entry"
+        assert content["metadata"] == {
+            "source": "diary",
+            "filename": "diary-2008-06-14.md",
+            "timezone": "Asia/Shanghai",
+        }
+        assert content["tags"] == ["diary", "year:2008", "month:2008-06"]
+        assert content["entities"] == [{"text": "用户", "type": "PERSON"}]
+        assert content["observation_scopes"] == "combined"
+        assert content["update_mode"] == "replace"
+        assert captured[0]["strategy"] == "diary_strategy"
     finally:
         memory._task_backend.submit_task = original_submit
 

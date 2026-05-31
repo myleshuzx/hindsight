@@ -1245,13 +1245,18 @@ export class ControlPlaneClient {
     files: File[];
     document_tags?: string[];
     async?: boolean;
+    parser?: string;
     files_metadata?: Array<{
       document_id?: string;
       context?: string;
       metadata?: Record<string, any>;
       tags?: string[];
       timestamp?: string;
+      parser?: string;
       strategy?: string;
+      entities?: Array<{ text: string; type?: string }>;
+      observation_scopes?: "per_tag" | "combined" | "all_combinations" | string[][];
+      update_mode?: "replace" | "append";
     }>;
   }) {
     const formData = new FormData();
@@ -1267,9 +1272,11 @@ export class ControlPlaneClient {
       async: params.async ?? true,
     };
     if (params.document_tags) requestData.document_tags = params.document_tags;
-    if (params.files_metadata) requestData.files_metadata = params.files_metadata;
+    if (params.parser) requestData.parser = params.parser;
 
     formData.append("request", JSON.stringify(requestData));
+    if (params.parser) formData.append("parser", params.parser);
+    if (params.files_metadata) formData.append("files_metadata", JSON.stringify(params.files_metadata));
 
     // Use fetch directly for multipart/form-data
     const response = await fetch(`/api/files/retain`, {

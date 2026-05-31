@@ -910,6 +910,12 @@ class MemoryEngine(MemoryEngineInterface):
             "metadata": task_dict.get("metadata", {}),
             "tags": task_dict.get("tags", []),
         }
+        if task_dict.get("entities") is not None:
+            retain_content["entities"] = task_dict["entities"]
+        if task_dict.get("observation_scopes") is not None:
+            retain_content["observation_scopes"] = task_dict["observation_scopes"]
+        if task_dict.get("update_mode") is not None:
+            retain_content["update_mode"] = task_dict["update_mode"]
         file_timestamp = task_dict.get("timestamp")
         if file_timestamp == "unset":
             retain_content["event_date"] = None
@@ -9463,6 +9469,9 @@ class MemoryEngine(MemoryEngineInterface):
                 - tags: Optional tags list
                 - timestamp: Optional timestamp
                 - parser: Ordered list of parser names to try (fallback chain)
+                - entities: Optional user-provided entities
+                - observation_scopes: Optional observation scoping mode or custom scopes
+                - update_mode: Optional retain update mode (replace or append)
             document_tags: Tags applied to all documents
             request_context: Request context for authentication
 
@@ -9525,6 +9534,12 @@ class MemoryEngine(MemoryEngineInterface):
                 "document_tags": document_tags or [],
                 "timestamp": item.get("timestamp"),
             }
+            if item.get("entities") is not None:
+                task_payload["entities"] = item["entities"]
+            if item.get("observation_scopes") is not None:
+                task_payload["observation_scopes"] = item["observation_scopes"]
+            if item.get("update_mode") is not None:
+                task_payload["update_mode"] = item["update_mode"]
             if item.get("strategy"):
                 task_payload["strategy"] = item["strategy"]
 

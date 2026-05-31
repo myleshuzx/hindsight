@@ -585,6 +585,22 @@ class FileRetainMetadata(BaseModel):
         description="Named retain strategy for this file. Overrides the bank's default strategy. "
         "Strategies are defined in the bank config under 'retain_strategies'.",
     )
+    entities: list[EntityInput] | None = Field(
+        default=None,
+        description="Optional entities to combine with auto-extracted entities for this file.",
+    )
+    update_mode: Literal["replace", "append"] | None = Field(
+        default=None,
+        description="How to handle an existing document with the same document_id for this file. "
+        "'replace' deletes old data and reprocesses from scratch. "
+        "'append' concatenates new content to the existing document text and reprocesses. "
+        "Omit to preserve the default file retain behavior.",
+    )
+    observation_scopes: Literal["per_tag", "combined", "all_combinations"] | list[list[str]] | None = Field(
+        default=None,
+        title="ObservationScopes",
+        description="How to scope observations during consolidation for this file.",
+    )
 
 
 class FileRetainRequest(BaseModel):
@@ -595,7 +611,13 @@ class FileRetainRequest(BaseModel):
             "example": {
                 "parser": "iris",
                 "files_metadata": [
-                    {"document_id": "report_2024", "tags": ["quarterly"]},
+                    {
+                        "document_id": "report_2024",
+                        "tags": ["quarterly"],
+                        "entities": [{"text": "Alice", "type": "PERSON"}],
+                        "observation_scopes": "combined",
+                        "update_mode": "replace",
+                    },
                     {"context": "meeting notes", "parser": ["iris", "markitdown"]},
                 ],
             }
@@ -612,6 +634,13 @@ class FileRetainRequest(BaseModel):
         default=None,
         description="Metadata for each file (optional, must match number of files if provided)",
     )
+
+
+def _parse_form_json_field(raw: str, field_name: str) -> Any:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=422, detail=f"Invalid {field_name} JSON: {str(e)}") from e
 
 
 class RetainResponse(BaseModel):
@@ -2739,11 +2768,22 @@ def create_app(
 
     def _patched_openapi() -> dict[str, Any]:
         schema = _original_openapi()
-        ve = schema.get("components", {}).get("schemas", {}).get("ValidationError")
+        component_schemas = schema.setdefault("components", {}).setdefault("schemas", {})
+        ve = component_schemas.get("ValidationError")
         if ve and "input" not in ve.get("properties", {}):
             ve["properties"]["input"] = {"title": "Input"}
             ve["properties"]["ctx"] = {"title": "Context", "type": "object"}
             ve["properties"]["url"] = {"title": "URL", "type": "string"}
+        file_retain_schema = FileRetainRequest.model_json_schema(ref_template="#/components/schemas/{model}")
+        for name, definition in file_retain_schema.pop("$defs", {}).items():
+            component_schemas.setdefault(name, definition)
+        component_schemas.setdefault("FileRetainRequest", file_retain_schema)
+        file_body = component_schemas.get("Body_file_retain")
+        if file_body:
+            request_schema = file_body.get("properties", {}).get("request")
+            if request_schema:
+                request_schema["contentMediaType"] = "application/json"
+                request_schema["x-json-schema-ref"] = "#/components/schemas/FileRetainRequest"
         return schema
 
     app.openapi = _patched_openapi  # type: ignore[assignment]
@@ -5894,9 +5934,11 @@ def _register_routes(app: FastAPI):
         "Use the operations endpoint to monitor progress.\n\n"
         "**Request format:** multipart/form-data with:\n"
         "- `files`: One or more files to upload\n"
-        "- `request`: JSON string with FileRetainRequest model\n\n"
+        "- `request`: Optional JSON string with FileRetainRequest model (legacy clients)\n"
+        "- `files_metadata`: Optional JSON array of per-file FileRetainMetadata entries\n"
+        "- `parser`: Optional default parser or JSON parser array for all files\n\n"
         "**Parser selection:**\n"
-        "- Set `parser` in the request body to override the server default for all files.\n"
+        "- Set `parser` as a form field or in the request body to override the server default for all files.\n"
         "- Set `parser` inside a `files_metadata` entry for per-file control.\n"
         "- Pass a list (e.g. `['iris', 'markitdown']`) to define an ordered fallback chain — "
         "each parser is tried in sequence until one succeeds.\n"
@@ -5909,7 +5951,9 @@ def _register_routes(app: FastAPI):
     async def api_file_retain(
         bank_id: str,
         files: list[UploadFile] = File(..., description="Files to upload and convert"),
-        request: str = Form(..., description="JSON string with FileRetainRequest model"),
+        request: str | None = Form(None, description="Optional JSON string with FileRetainRequest model"),
+        files_metadata: str | None = Form(None, description="Optional JSON array of FileRetainMetadata objects"),
+        parser: str | None = Form(None, description="Optional default parser name or JSON parser array"),
         request_context: RequestContext = Depends(get_request_context),
     ):
         """Upload and convert files to memories."""
@@ -5925,14 +5969,37 @@ def _register_routes(app: FastAPI):
             )
 
         try:
-            # Parse request JSON
-            try:
-                request_data = FileRetainRequest.model_validate_json(request)
-            except Exception as e:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid request JSON: {str(e)}",
-                )
+            # Parse legacy request JSON first, then let explicit multipart fields override it.
+            if request:
+                try:
+                    request_data = FileRetainRequest.model_validate_json(request)
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid request JSON: {str(e)}",
+                    )
+            else:
+                request_data = FileRetainRequest()
+
+            if files_metadata is not None:
+                parsed_metadata = _parse_form_json_field(files_metadata, "files_metadata")
+                if not isinstance(parsed_metadata, list):
+                    raise HTTPException(status_code=422, detail="files_metadata must be a JSON array")
+                try:
+                    request_data.files_metadata = [
+                        FileRetainMetadata.model_validate(item) for item in parsed_metadata
+                    ]
+                except Exception as e:
+                    raise HTTPException(status_code=422, detail=f"Invalid files_metadata: {str(e)}") from e
+
+            if parser is not None:
+                parser_value = _parse_form_json_field(parser, "parser") if parser.strip().startswith("[") else parser
+                try:
+                    request_data = FileRetainRequest.model_validate(
+                        {**request_data.model_dump(), "parser": parser_value}
+                    )
+                except Exception as e:
+                    raise HTTPException(status_code=422, detail=f"Invalid parser: {str(e)}") from e
 
             # Validate file count
             if len(files) > config.file_conversion_max_batch_size:
@@ -5942,9 +6009,9 @@ def _register_routes(app: FastAPI):
                 )
 
             # Validate files_metadata count matches files count if provided
-            if request_data.files_metadata and len(request_data.files_metadata) != len(files):
+            if request_data.files_metadata is not None and len(request_data.files_metadata) != len(files):
                 raise HTTPException(
-                    status_code=400,
+                    status_code=422,
                     detail=f"files_metadata count ({len(request_data.files_metadata)}) must match files count ({len(files)})",
                 )
 
@@ -6013,6 +6080,11 @@ def _register_routes(app: FastAPI):
                     "timestamp": file_meta.timestamp,
                     "parser": parser_chain,
                     "strategy": file_meta.strategy,
+                    "entities": [entity.model_dump(exclude_none=True) for entity in file_meta.entities]
+                    if file_meta.entities is not None
+                    else None,
+                    "observation_scopes": file_meta.observation_scopes,
+                    "update_mode": file_meta.update_mode,
                 }
                 file_items.append(item)
 
