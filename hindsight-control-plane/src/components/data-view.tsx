@@ -78,7 +78,7 @@ export function DataView({
   onExpandToggle,
 }: DataViewProps) {
   const { currentBank } = useBank();
-  const [viewMode, setViewMode] = useState<ViewMode>("constellation");
+  const [viewMode, setViewMode] = useState<ViewMode>("timeline");
   const [compactMode, setCompactMode] = useState(compact);
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
@@ -356,7 +356,9 @@ export function DataView({
   const executeSearch = () => {
     if (currentBank) {
       setCurrentPage(1);
-      loadData(undefined, searchQuery || undefined, tagFilters.length > 0 ? tagFilters : undefined);
+      if (compactMode || viewMode !== "timeline") {
+        loadData(undefined, searchQuery || undefined, tagFilters.length > 0 ? tagFilters : undefined);
+      }
       if (viewMode === "timeline") {
         loadTimelineData(0);
       }
@@ -366,7 +368,9 @@ export function DataView({
   // Trigger server-side reload immediately when tag filters change
   useEffect(() => {
     if (currentBank) {
-      loadData(undefined, searchQuery || undefined, tagFilters.length > 0 ? tagFilters : undefined);
+      if (compactMode || viewMode !== "timeline") {
+        loadData(undefined, searchQuery || undefined, tagFilters.length > 0 ? tagFilters : undefined);
+      }
       if (viewMode === "timeline") {
         loadTimelineData(0);
       }
@@ -376,11 +380,13 @@ export function DataView({
   // Auto-load data when component mounts or factType/currentBank changes
   useEffect(() => {
     if (currentBank) {
-      loadData();
+      if (compactMode || viewMode !== "timeline") {
+        loadData();
+      }
       setTimelineData(null);
       setTimelinePage(1);
     }
-  }, [factType, currentBank, documentId, chunkId]);
+  }, [factType, currentBank, documentId, chunkId, compactMode, viewMode]);
 
   useEffect(() => {
     if (currentBank && viewMode === "timeline") {
@@ -401,14 +407,16 @@ export function DataView({
     }
   }, [data, graph2DData.nodes.length, maxNodes]);
 
+  const timelineOnly = !compactMode && viewMode === "timeline";
+
   return (
     <div>
-      {loading && !data ? (
+      {loading && !data && !timelineOnly ? (
         <div className="text-center py-12">
           <RefreshCw className="w-8 h-8 mx-auto mb-3 text-muted-foreground animate-spin" />
           <p className="text-muted-foreground">Loading memories...</p>
         </div>
-      ) : data && data.total_units === 0 ? (
+      ) : data && data.total_units === 0 && !timelineOnly ? (
         <div className="text-center py-20">
           <FileText className="w-10 h-10 mx-auto mb-4 text-muted-foreground/50" />
           <h3 className="text-base font-medium text-foreground mb-1">No memories</h3>
@@ -432,7 +440,7 @@ export function DataView({
             </>
           )}
         </div>
-      ) : data ? (
+      ) : data || timelineOnly ? (
         <>
           {/* Always visible filters */}
           {!compactMode && (
