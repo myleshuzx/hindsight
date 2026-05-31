@@ -1196,6 +1196,119 @@ class TestConsolidationTagRouting:
         await memory.delete_bank(bank_id, request_context=request_context)
 
     @pytest.mark.asyncio
+    async def test_consolidation_fetches_pending_memories_by_event_time_fallback(
+        self, memory: MemoryEngine, request_context
+    ):
+        """Pending source memories are fetched by event-time fallback before import time."""
+        from hindsight_api.engine.consolidation.consolidator import _ConsolidationBatchResponse
+        from hindsight_api.engine.providers.mock_llm import MockLLM
+
+        bank_id = f"test-consolidation-event-order-{uuid.uuid4().hex[:8]}"
+        await memory.get_bank_profile(bank_id=bank_id, request_context=request_context)
+
+        raw = _get_raw_config()
+        fake_config = type(raw)(
+            **{
+                **{f: getattr(raw, f) for f in raw.__dataclass_fields__},
+                "consolidation_batch_size": 10,
+                "consolidation_llm_batch_size": 10,
+            }
+        )
+
+        seen_prompt: list[str] = []
+        mock_llm = MockLLM(provider="mock", api_key="", base_url="", model="mock-model")
+
+        def callback(messages, scope):
+            if scope == "consolidation":
+                seen_prompt.append(messages[0]["content"] if messages else "")
+            return _ConsolidationBatchResponse()
+
+        mock_llm.set_response_callback(callback)
+        wrapper = MagicMock()
+        wrapper.with_config.return_value = mock_llm
+
+        original_global_config = memory._config_resolver._global_config
+        original_llm = memory._consolidation_llm_config
+        memory._config_resolver._global_config = fake_config
+        memory._consolidation_llm_config = wrapper
+
+        try:
+            async with memory._pool.acquire() as conn:
+                rows = [
+                    (
+                        uuid.uuid4(),
+                        "created-at fallback memory",
+                        None,
+                        None,
+                        None,
+                        datetime(2024, 4, 1, tzinfo=timezone.utc),
+                    ),
+                    (
+                        uuid.uuid4(),
+                        "mentioned-at fallback memory",
+                        None,
+                        None,
+                        datetime(2024, 3, 1, tzinfo=timezone.utc),
+                        datetime(2024, 4, 2, tzinfo=timezone.utc),
+                    ),
+                    (
+                        uuid.uuid4(),
+                        "event-date fallback memory",
+                        None,
+                        datetime(2024, 2, 1, tzinfo=timezone.utc),
+                        datetime(2024, 3, 2, tzinfo=timezone.utc),
+                        datetime(2024, 4, 3, tzinfo=timezone.utc),
+                    ),
+                    (
+                        uuid.uuid4(),
+                        "occurred-start memory",
+                        datetime(2024, 1, 1, tzinfo=timezone.utc),
+                        datetime(2024, 2, 2, tzinfo=timezone.utc),
+                        datetime(2024, 3, 3, tzinfo=timezone.utc),
+                        datetime(2024, 4, 4, tzinfo=timezone.utc),
+                    ),
+                ]
+                await conn.executemany(
+                    """
+                    INSERT INTO memory_units (
+                        id, bank_id, text, fact_type, occurred_start, event_date, mentioned_at, created_at
+                    )
+                    VALUES ($1, $2, $3, 'experience', $4, $5, $6, $7)
+                    """,
+                    [
+                        (mem_id, bank_id, text, occurred_start, event_date, mentioned_at, created_at)
+                        for mem_id, text, occurred_start, event_date, mentioned_at, created_at in rows
+                    ],
+                )
+
+            result = await run_consolidation_job(
+                memory_engine=memory,
+                bank_id=bank_id,
+                request_context=request_context,
+            )
+
+            assert result["status"] == "completed"
+            assert seen_prompt, "Consolidation should make an LLM call with pending memories"
+            prompt = seen_prompt[0]
+            assert [
+                prompt.index("occurred-start memory"),
+                prompt.index("event-date fallback memory"),
+                prompt.index("mentioned-at fallback memory"),
+                prompt.index("created-at fallback memory"),
+            ] == sorted(
+                [
+                    prompt.index("occurred-start memory"),
+                    prompt.index("event-date fallback memory"),
+                    prompt.index("mentioned-at fallback memory"),
+                    prompt.index("created-at fallback memory"),
+                ]
+            )
+        finally:
+            memory._config_resolver._global_config = original_global_config
+            memory._consolidation_llm_config = original_llm
+            await memory.delete_bank(bank_id, request_context=request_context)
+
+    @pytest.mark.asyncio
     async def test_observation_temporal_range_expands_on_update(self, memory: MemoryEngine, request_context):
         """Test that observation temporal range uses LEAST(occurred_start) and GREATEST(occurred_end).
 

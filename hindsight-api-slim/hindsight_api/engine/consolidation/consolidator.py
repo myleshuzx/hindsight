@@ -339,7 +339,12 @@ async def run_consolidation_job(
                   AND consolidated_at IS NULL
                   AND consolidation_failed_at IS NULL
                   AND fact_type IN ('experience', 'world')
-                ORDER BY created_at ASC
+                -- Historical backfills should consolidate in event-time order
+                -- instead of import-time order when temporal fields are present.
+                ORDER BY
+                  COALESCE(occurred_start, event_date, mentioned_at, created_at) ASC,
+                  created_at ASC,
+                  id ASC
                 LIMIT $2
                 """,
                 bank_id,
