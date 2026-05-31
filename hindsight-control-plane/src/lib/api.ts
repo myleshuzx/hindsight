@@ -296,6 +296,7 @@ export class ControlPlaneClient {
       tags?: string[];
       observation_scopes?: "per_tag" | "combined" | "all_combinations" | string[][];
       strategy?: string;
+      update_mode?: "replace" | "append";
     }>;
     document_id?: string;
     async?: boolean;

@@ -5,7 +5,18 @@ import { client } from "@/lib/api";
 import { useBank } from "@/lib/bank-context";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Loader2, Calendar, Users, FileText, Layers, Tag, History } from "lucide-react";
+import {
+  Loader2,
+  Calendar,
+  Users,
+  FileText,
+  Layers,
+  Tag,
+  History,
+  Pencil,
+  Check,
+  X,
+} from "lucide-react";
 import { TagList } from "@/components/ui/tag-list";
 import { Button } from "@/components/ui/button";
 import { ObservationHistoryView, type HistoryEntry } from "@/components/observation-history-view";
@@ -54,6 +65,10 @@ export function MemoryDetailModal({ memoryId, onClose, initialTab }: MemoryDetai
   const [chunk, setChunk] = useState<any>(null);
   const [loadingDocument, setLoadingDocument] = useState(false);
   const [loadingChunk, setLoadingChunk] = useState(false);
+  const [editingDocumentContent, setEditingDocumentContent] = useState(false);
+  const [documentContentInput, setDocumentContentInput] = useState("");
+  const [savingDocumentContent, setSavingDocumentContent] = useState(false);
+  const [documentEditStatus, setDocumentEditStatus] = useState<string | null>(null);
 
   // History data (fetched lazily from dedicated endpoint)
   const [history, setHistory] = useState<HistoryEntry[] | null>(null);
@@ -73,6 +88,9 @@ export function MemoryDetailModal({ memoryId, onClose, initialTab }: MemoryDetai
       setDocument(null);
       setChunk(null);
       setHistory(null);
+      setEditingDocumentContent(false);
+      setDocumentContentInput("");
+      setDocumentEditStatus(null);
       setActiveTab(initialTab ?? "memory");
 
       try {
@@ -155,6 +173,71 @@ export function MemoryDetailModal({ memoryId, onClose, initialTab }: MemoryDetai
   }, [activeTab, memory?.chunk_id, chunk]);
 
   const isOpen = memoryId !== null;
+
+  const startEditDocumentContent = () => {
+    setDocumentContentInput(document?.original_text ?? "");
+    setDocumentEditStatus(null);
+    setEditingDocumentContent(true);
+  };
+
+  const cancelEditDocumentContent = () => {
+    setEditingDocumentContent(false);
+    setDocumentContentInput("");
+    setDocumentEditStatus(null);
+  };
+
+  const saveDocumentContent = async () => {
+    if (!currentBank || !document) return;
+
+    const newContent = documentContentInput;
+    if (!newContent.trim()) return;
+
+    const retainParams = document.retain_params ?? {};
+    const item: Parameters<typeof client.retain>[0]["items"][number] = {
+      content: newContent,
+      document_id: document.id,
+      update_mode: "replace",
+    };
+    if (retainParams.context) item.context = retainParams.context;
+    if (retainParams.event_date) item.timestamp = retainParams.event_date;
+    if (retainParams.metadata && Object.keys(retainParams.metadata).length > 0) {
+      item.metadata = retainParams.metadata;
+    }
+    if (retainParams.entities && retainParams.entities.length > 0) {
+      item.entities = retainParams.entities;
+    }
+    if (document.tags && document.tags.length > 0) {
+      item.tags = document.tags;
+    }
+    if (retainParams.observation_scopes !== undefined) {
+      item.observation_scopes = retainParams.observation_scopes;
+    }
+    if (retainParams.strategy) {
+      item.strategy = retainParams.strategy;
+    }
+
+    setSavingDocumentContent(true);
+    setDocumentEditStatus(null);
+    try {
+      await client.retain({
+        bank_id: currentBank,
+        items: [item],
+        async: false,
+      });
+      const refreshed = await client.getDocument(document.id, currentBank);
+      setDocument(refreshed);
+      setEditingDocumentContent(false);
+      setDocumentContentInput("");
+      setDocumentEditStatus(
+        "Document saved. Retain completed and consolidation was queued if enabled."
+      );
+    } catch (err) {
+      console.error("Error updating document content:", err);
+      setDocumentEditStatus(`Error updating document: ${(err as Error).message}`);
+    } finally {
+      setSavingDocumentContent(false);
+    }
+  };
 
   // Determine the display title based on memory type
   const getMemoryTypeTitle = () => {
@@ -610,7 +693,7 @@ export function MemoryDetailModal({ memoryId, onClose, initialTab }: MemoryDetai
                           </div>
                         </div>
 
-                        {document.original_text && (
+                        {document.original_text !== undefined && (
                           <>
                             <div className="p-3 bg-muted rounded-lg">
                               <div className="text-xs font-bold text-muted-foreground uppercase mb-1">
@@ -622,14 +705,82 @@ export function MemoryDetailModal({ memoryId, onClose, initialTab }: MemoryDetai
                             </div>
 
                             <div>
-                              <div className="text-xs font-bold text-muted-foreground uppercase mb-2">
-                                Original Text
+                              <div className="flex items-center justify-between gap-2 mb-2">
+                                <div className="text-xs font-bold text-muted-foreground uppercase">
+                                  Original Text
+                                </div>
+                                {!editingDocumentContent && (
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={startEditDocumentContent}
+                                    className="h-7 px-2 gap-1 text-xs"
+                                  >
+                                    <Pencil className="h-3 w-3" />
+                                    Edit
+                                  </Button>
+                                )}
                               </div>
-                              <div className="p-4 bg-muted rounded-lg border border-border max-h-[300px] overflow-y-auto">
-                                <pre className="text-sm whitespace-pre-wrap font-mono text-foreground">
-                                  {document.original_text}
-                                </pre>
-                              </div>
+                              {editingDocumentContent ? (
+                                <div className="space-y-2">
+                                  <textarea
+                                    value={documentContentInput}
+                                    onChange={(e) => setDocumentContentInput(e.target.value)}
+                                    className="w-full min-h-[300px] p-4 bg-muted rounded-lg border border-border text-sm whitespace-pre-wrap font-mono text-foreground resize-y"
+                                    autoFocus
+                                  />
+                                  <div className="flex items-center justify-between gap-2">
+                                    <p className="text-xs text-muted-foreground">
+                                      Saving re-ingests this document and replaces its derived
+                                      memories.
+                                    </p>
+                                    <div className="flex gap-2">
+                                      <Button
+                                        size="sm"
+                                        onClick={saveDocumentContent}
+                                        disabled={
+                                          savingDocumentContent || !documentContentInput.trim()
+                                        }
+                                        className="h-7 px-3 gap-1 text-xs"
+                                      >
+                                        {savingDocumentContent ? (
+                                          <Loader2 className="h-3 w-3 animate-spin" />
+                                        ) : (
+                                          <Check className="h-3 w-3" />
+                                        )}
+                                        Save
+                                      </Button>
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={cancelEditDocumentContent}
+                                        disabled={savingDocumentContent}
+                                        className="h-7 px-3 gap-1 text-xs"
+                                      >
+                                        <X className="h-3 w-3" />
+                                        Cancel
+                                      </Button>
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="p-4 bg-muted rounded-lg border border-border max-h-[300px] overflow-y-auto">
+                                  <pre className="text-sm whitespace-pre-wrap font-mono text-foreground">
+                                    {document.original_text}
+                                  </pre>
+                                </div>
+                              )}
+                              {documentEditStatus && (
+                                <p
+                                  className={`mt-2 text-xs ${
+                                    documentEditStatus.startsWith("Error")
+                                      ? "text-destructive"
+                                      : "text-muted-foreground"
+                                  }`}
+                                >
+                                  {documentEditStatus}
+                                </p>
+                              )}
                             </div>
                           </>
                         )}
