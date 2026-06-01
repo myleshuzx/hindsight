@@ -984,12 +984,11 @@ function BankSelectorInner() {
                                                 Event Date
                                               </label>
                                               <Input
-                                                type="text"
+                                                type="date"
                                                 value={meta.timestamp}
                                                 onChange={(e) =>
                                                   updateFileMeta(index, "timestamp", e.target.value)
                                                 }
-                                                placeholder="2008-06-14T00:00:00+08:00"
                                                 className="h-8 text-sm text-foreground"
                                               />
                                             </div>
