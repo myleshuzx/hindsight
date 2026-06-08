@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { client } from "@/lib/api";
 import { useBank } from "@/lib/bank-context";
+import { DocumentContentEditor } from "@/components/document-content-editor";
 import {
   Dialog,
   DialogContent,
@@ -22,6 +23,10 @@ export function DocumentChunkModal({ type, id, onClose }: DocumentChunkModalProp
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const handleDocumentSaved = (document: unknown) => {
+    setData(document);
+  };
 
   useEffect(() => {
     if (!id) return;
@@ -122,15 +127,12 @@ export function DocumentChunkModal({ type, id, onClose }: DocumentChunkModalProp
                     )}
                   </div>
 
-                  {data.original_text && (
-                    <div>
-                      <div className="text-sm font-bold text-foreground mb-2">Original Text</div>
-                      <div className="p-4 bg-muted rounded-lg border border-border max-h-[300px] overflow-y-auto">
-                        <pre className="text-sm whitespace-pre-wrap font-mono text-foreground">
-                          {data.original_text}
-                        </pre>
-                      </div>
-                    </div>
+                  {data.original_text !== undefined && (
+                    <DocumentContentEditor
+                      document={data}
+                      maxHeightClassName="max-h-[300px]"
+                      onSaved={handleDocumentSaved}
+                    />
                   )}
                 </>
               ) : (

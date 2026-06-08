@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { client } from "@/lib/api";
 import { useBank } from "@/lib/bank-context";
 import { DataView } from "./data-view";
+import { DocumentContentEditor } from "@/components/document-content-editor";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -40,7 +41,6 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
-  Pencil,
   Check,
   RefreshCw,
   MoreVertical,
@@ -50,6 +50,7 @@ import {
   ChevronDown,
   Network,
   Eye,
+  Pencil,
 } from "lucide-react";
 
 const ITEMS_PER_PAGE = 50;
@@ -339,11 +340,6 @@ export function DocumentsView() {
   const [tagInput, setTagInput] = useState("");
   const [savingTags, setSavingTags] = useState(false);
 
-  // Content editing state
-  const [editingContent, setEditingContent] = useState(false);
-  const [contentInput, setContentInput] = useState("");
-  const [savingContent, setSavingContent] = useState(false);
-
   // Chunks state
   const [chunks, setChunks] = useState<any[]>([]);
   const [chunksTotal, setChunksTotal] = useState(0);
@@ -413,8 +409,6 @@ export function DocumentsView() {
     setSelectedDocument({ id: documentId }); // Set placeholder to show loading
     setEditingTags(false);
     setTagInput("");
-    setEditingContent(false);
-    setContentInput("");
     setChunks([]);
     setChunksTotal(0);
     setChunksLoaded(false);
@@ -516,54 +510,19 @@ export function DocumentsView() {
     setTagInput("");
   };
 
-  const startEditContent = () => {
-    setContentInput(selectedDocument?.original_text ?? "");
-    setEditingContent(true);
+  const handleDocumentContentSaved = (document: unknown) => {
+    setSelectedDocument(document);
+    setChunks([]);
+    setChunksTotal(0);
+    setChunksLoaded(false);
+    loadDocuments(currentPage);
   };
 
-  const cancelEditContent = () => {
-    setEditingContent(false);
-    setContentInput("");
-  };
-
-  const saveDocumentContent = async () => {
-    if (!currentBank || !selectedDocument) return;
-
-    const newContent = contentInput;
-    if (!newContent.trim()) return;
-
-    const retainParams = selectedDocument.retain_params ?? {};
-    const item: Parameters<typeof client.retain>[0]["items"][number] = {
-      content: newContent,
-      document_id: selectedDocument.id,
-    };
-    if (retainParams.context) item.context = retainParams.context;
-    if (retainParams.event_date) item.timestamp = retainParams.event_date;
-    if (retainParams.metadata && Object.keys(retainParams.metadata).length > 0) {
-      item.metadata = retainParams.metadata;
-    }
-    if (selectedDocument.tags && selectedDocument.tags.length > 0) {
-      item.tags = selectedDocument.tags;
-    }
-
-    setSavingContent(true);
-    try {
-      await client.retain({
-        bank_id: currentBank,
-        items: [item],
-        async: false,
-      });
-      // Refresh the document and the list
-      const doc: any = await client.getDocument(selectedDocument.id, currentBank);
-      setSelectedDocument(doc);
-      setEditingContent(false);
-      setContentInput("");
-      loadDocuments(currentPage);
-    } catch (error) {
-      console.error("Error updating document content:", error);
-    } finally {
-      setSavingContent(false);
-    }
+  const handleDocumentContentQueued = () => {
+    setChunks([]);
+    setChunksTotal(0);
+    setChunksLoaded(false);
+    loadDocuments(currentPage);
   };
 
   const saveDocumentTags = async () => {
@@ -867,75 +826,14 @@ export function DocumentsView() {
               <div className="flex-1 overflow-y-auto mt-4">
                 {/* Content Tab */}
                 <TabsContent value="content" className="mt-0">
-                  {selectedDocument.original_text !== undefined &&
-                    (editingContent ? (
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-end mb-2">
-                          <div className="flex gap-2">
-                            <Button
-                              size="sm"
-                              onClick={saveDocumentContent}
-                              disabled={savingContent || !contentInput.trim()}
-                              className="h-7 px-3 gap-1 text-xs"
-                            >
-                              {savingContent ? (
-                                <span className="animate-spin">⏳</span>
-                              ) : (
-                                <Check className="h-3 w-3" />
-                              )}
-                              Save
-                            </Button>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={cancelEditContent}
-                              disabled={savingContent}
-                              className="h-7 px-3 gap-1 text-xs"
-                            >
-                              <X className="h-3 w-3" />
-                              Cancel
-                            </Button>
-                          </div>
-                        </div>
-                        <textarea
-                          value={contentInput}
-                          onChange={(e) => setContentInput(e.target.value)}
-                          className="w-full min-h-[400px] max-h-[600px] p-4 bg-muted/50 rounded-lg border border-border text-sm font-mono leading-relaxed text-card-foreground resize-y"
-                          autoFocus
-                        />
-                        <p className="text-xs text-muted-foreground">
-                          Saving will re-ingest this document via retain (upsert). Existing memory
-                          units for this document will be replaced.
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="rounded-lg border border-border bg-muted/30 overflow-hidden">
-                        <div className="flex items-center justify-between gap-2 px-4 py-2 border-b border-border bg-muted/50 text-xs text-muted-foreground">
-                          <div className="flex items-center gap-1.5">
-                            <FileText className="w-3.5 h-3.5" />
-                            <span className="font-semibold uppercase tracking-wide">
-                              Stored content
-                            </span>
-                            <span className="text-muted-foreground/70">
-                              &middot;{" "}
-                              {selectedDocument.original_text?.length?.toLocaleString() ?? 0} chars
-                            </span>
-                          </div>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={startEditContent}
-                            className="h-6 px-2 gap-1 text-xs"
-                          >
-                            <Pencil className="h-3 w-3" />
-                            Edit
-                          </Button>
-                        </div>
-                        <pre className="p-4 text-[11px] leading-5 text-foreground/80 whitespace-pre-wrap font-mono">
-                          {selectedDocument.original_text}
-                        </pre>
-                      </div>
-                    ))}
+                  {selectedDocument.original_text !== undefined && (
+                    <DocumentContentEditor
+                      document={selectedDocument}
+                      maxHeightClassName="max-h-[600px]"
+                      onSaved={handleDocumentContentSaved}
+                      onQueued={handleDocumentContentQueued}
+                    />
+                  )}
                 </TabsContent>
 
                 {/* General Tab */}
