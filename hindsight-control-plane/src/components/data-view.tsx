@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { useTranslations } from "next-intl";
 import { client } from "@/lib/api";
 import { useBank } from "@/lib/bank-context";
 import { Button } from "@/components/ui/button";
@@ -22,6 +23,7 @@ import {
   Network,
   List,
   Search,
+  Layers,
 } from "lucide-react";
 import {
   Table,
@@ -46,6 +48,7 @@ import { MemoryDetailModal } from "./memory-detail-modal";
 import { Graph2D, convertHindsightGraphData, GraphNode } from "./graph-2d";
 import { Constellation } from "./constellation";
 import { TagFilterInput } from "./tag-filter-input";
+import { ObservationScopeFilter, ObservationScope } from "./observation-scope-filter";
 import { ScatterChart, Plus, FileText } from "lucide-react";
 
 type FactType = "world" | "experience" | "observation";
@@ -62,6 +65,27 @@ type TimelineMemory = {
   has_event_date?: boolean;
 };
 
+// Categorical palette for coloring observation scopes (exact tag sets) when
+// "Group by scope" clusters the constellation. Distinct, reasonably separable hues.
+const SCOPE_PALETTE = [
+  "#0074d9",
+  "#e11d48",
+  "#16a34a",
+  "#f59e0b",
+  "#8b5cf6",
+  "#06b6d4",
+  "#ec4899",
+  "#65a30d",
+  "#f97316",
+  "#6366f1",
+];
+
+// Stable key for a scope = its tag set, order-normalized (matches the backend's
+// normalized scope enumeration so colors are consistent regardless of tag order).
+function scopeKeyOf(tags: string[] | undefined): string {
+  return JSON.stringify([...(tags || [])].sort());
+}
+
 interface DataViewProps {
   factType: FactType;
   documentId?: string;
@@ -77,6 +101,8 @@ export function DataView({
   compact = false,
   onExpandToggle,
 }: DataViewProps) {
+  const t = useTranslations("dataView");
+  const tAddDoc = useTranslations("addDocument");
   const { currentBank } = useBank();
   const [viewMode, setViewMode] = useState<ViewMode>("timeline");
   const [compactMode, setCompactMode] = useState(compact);
@@ -84,13 +110,18 @@ export function DataView({
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [tagFilters, setTagFilters] = useState<string[]>([]);
+  // Observation scope filtering: the distinct scopes available, and the selected
+  // one. `null` = all scopes; `[]` = the global (untagged) scope; otherwise an
+  // exact tag set. Mutually exclusive with the free-form tag filter above.
+  const [scopes, setScopes] = useState<ObservationScope[]>([]);
+  const [selectedScope, setSelectedScope] = useState<string[] | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedGraphNode, setSelectedGraphNode] = useState<any>(null);
   const [modalMemoryId, setModalMemoryId] = useState<string | null>(null);
+  // Table view: toggle between live facts (graph-fed) and invalidated facts (archive).
+  const [showInvalidated, setShowInvalidated] = useState(false);
+  const [invalidatedRows, setInvalidatedRows] = useState<any[]>([]);
   const itemsPerPage = 100;
-
-  // Fetch limit state - how many memories to load from the API
-  const [fetchLimit, setFetchLimit] = useState(1000);
   const timelinePageSize = 100;
   const [timelineData, setTimelineData] = useState<{
     items: TimelineMemory[];
@@ -101,14 +132,19 @@ export function DataView({
   const [timelineLoading, setTimelineLoading] = useState(false);
   const [timelinePage, setTimelinePage] = useState(1);
 
+  // Fetch limit state - how many memories to load from the API
+  const [fetchLimit, setFetchLimit] = useState(1000);
+
   // Which timestamp drives the constellation recency color
   type RecencyBasis = "mentioned_at" | "occurred_start" | "occurred_end";
   const RECENCY_BASIS_LABEL: Record<RecencyBasis, string> = {
-    mentioned_at: "mentioned",
-    occurred_start: "occurred (start)",
-    occurred_end: "occurred (end)",
+    mentioned_at: t("recencyBasisMentioned"),
+    occurred_start: t("recencyBasisOccurredStart"),
+    occurred_end: t("recencyBasisOccurredEnd"),
   };
   const [recencyBasis, setRecencyBasis] = useState<RecencyBasis>("mentioned_at");
+  // Constellation: group observations into per-scope clusters (with colored blobs).
+  const [groupByScope, setGroupByScope] = useState(false);
 
   // Consolidation status for mental models
   const [consolidationStatus, setConsolidationStatus] = useState<{
@@ -147,10 +183,18 @@ export function DataView({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [selectedGraphNode]);
 
-  const loadData = async (limit?: number, q?: string, tags?: string[]) => {
+  // `silent` skips the loading spinner — used by the background consolidation
+  // poll so the view refreshes in place without flashing.
+  const loadData = async (
+    limit?: number,
+    q?: string,
+    tags?: string[],
+    tagsMatch?: string,
+    silent = false
+  ) => {
     if (!currentBank) return;
 
-    setLoading(true);
+    if (!silent) setLoading(true);
     try {
       const graphData: any = await client.getGraph({
         bank_id: currentBank,
@@ -158,6 +202,7 @@ export function DataView({
         limit: limit ?? fetchLimit,
         q,
         tags,
+        tags_match: tagsMatch,
         document_id: documentId,
         chunk_id: chunkId,
       });
@@ -174,36 +219,62 @@ export function DataView({
     } catch (error) {
       // Error toast is shown automatically by the API client interceptor
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
-  const loadTimelineData = async (offset = 0) => {
+  // Invalidated facts live in a separate archive, not the graph — fetch them via list.
+  const loadInvalidated = useCallback(async () => {
     if (!currentBank) return;
-
-    setTimelineLoading(true);
     try {
-      const result = await client.listMemories(currentBank, {
+      const resp: any = await client.listMemories(currentBank, {
+        state: "invalidated",
         type: factType,
-        q: searchQuery || undefined,
-        limit: timelinePageSize,
-        offset,
-        sort: "timeline",
-        order: "asc",
-        documentId,
-        chunkId,
+        limit: fetchLimit,
       });
-      setTimelineData(result);
-      setTimelinePage(Math.floor(offset / timelinePageSize) + 1);
-    } finally {
-      setTimelineLoading(false);
+      setInvalidatedRows(resp?.items ?? []);
+    } catch {
+      setInvalidatedRows([]);
     }
-  };
+  }, [currentBank, factType, fetchLimit]);
 
-  // Table rows are already filtered server-side
+  const loadTimelineData = useCallback(
+    async (offset = 0) => {
+      if (!currentBank) return;
+
+      setTimelineLoading(true);
+      try {
+        const result = await client.listMemories(currentBank, {
+          type: factType,
+          q: searchQuery || undefined,
+          limit: timelinePageSize,
+          offset,
+          sort: "timeline",
+          order: "asc",
+          documentId,
+          chunkId,
+        });
+        setTimelineData(result);
+        setTimelinePage(Math.floor(offset / timelinePageSize) + 1);
+      } finally {
+        setTimelineLoading(false);
+      }
+    },
+    [currentBank, factType, searchQuery, documentId, chunkId]
+  );
+
+  useEffect(() => {
+    if (showInvalidated && viewMode === "table") {
+      loadInvalidated();
+    }
+  }, [showInvalidated, viewMode, loadInvalidated]);
+
+  // Table rows: live rows are graph-fed (filtered server-side); invalidated rows
+  // come from the archive via list.
   const filteredTableRows = useMemo(() => {
+    if (showInvalidated) return invalidatedRows;
     return data?.table_rows ?? [];
-  }, [data]);
+  }, [data, showInvalidated, invalidatedRows]);
 
   // Helper to get normalized link type
   const getLinkTypeCategory = (type: string | undefined): string => {
@@ -323,6 +394,39 @@ export function DataView({
     [recencyLookup]
   );
 
+  // Assign each distinct observation scope (exact tag set) a stable color from
+  // the palette, in order of first appearance, for the "Group by scope" clusters.
+  const scopeColorLookup = useMemo(() => {
+    if (factType !== "observation" || !data?.table_rows) return null;
+    const map = new Map<string, string>();
+    let i = 0;
+    for (const row of data.table_rows as Array<{ tags?: string[] }>) {
+      const key = scopeKeyOf(row.tags);
+      if (!map.has(key)) map.set(key, SCOPE_PALETTE[i++ % SCOPE_PALETTE.length]);
+    }
+    return map;
+  }, [factType, data]);
+
+  const scopeClusterKeyFn = useCallback(
+    (node: GraphNode) => scopeKeyOf(node.metadata?.tags as string[] | undefined),
+    []
+  );
+  const scopeClusterColorFn = useCallback(
+    (key: string) => scopeColorLookup?.get(key) || "#0074d9",
+    [scopeColorLookup]
+  );
+  const scopeClusterLabelFn = useCallback(
+    (key: string) => {
+      try {
+        const tags = JSON.parse(key) as string[];
+        return tags.length ? tags.map((tag) => `#${tag}`).join(" ") : t("scopeGlobal");
+      } catch {
+        return key;
+      }
+    },
+    [t]
+  );
+
   const observationNodeSizeFn = useCallback(
     (node: GraphNode) => {
       if (!observationSizeLookup) return 3;
@@ -350,14 +454,30 @@ export function DataView({
   // Reset to first page when filters change
   useEffect(() => {
     setCurrentPage(1);
-  }, [tagFilters]);
+  }, [tagFilters, selectedScope]);
+
+  // Resolve the active tag filter into (tags, tags_match) for the graph query.
+  // A selected observation scope takes precedence and uses exact set-equality
+  // matching (so scope [a] excludes [a, b]); otherwise the free-form tag filter
+  // uses the default contains semantics. `null` scope means "no scope filter".
+  const resolveTagQuery = useCallback(
+    (scopeOverride?: string[] | null): { tags?: string[]; match?: string } => {
+      const scope = scopeOverride === undefined ? selectedScope : scopeOverride;
+      if (scope !== null) {
+        return { tags: scope, match: "exact" };
+      }
+      return { tags: tagFilters.length > 0 ? tagFilters : undefined };
+    },
+    [selectedScope, tagFilters]
+  );
 
   // Trigger text search on Enter key
   const executeSearch = () => {
     if (currentBank) {
       setCurrentPage(1);
+      const { tags, match } = resolveTagQuery();
       if (compactMode || viewMode !== "timeline") {
-        loadData(undefined, searchQuery || undefined, tagFilters.length > 0 ? tagFilters : undefined);
+        loadData(undefined, searchQuery || undefined, tags, match);
       }
       if (viewMode === "timeline") {
         loadTimelineData(0);
@@ -365,34 +485,84 @@ export function DataView({
     }
   };
 
-  // Trigger server-side reload immediately when tag filters change
+  // Single auto-loader for the graph data. This deliberately replaces what used
+  // to be two effects (mount/context + filter change) that BOTH fired on mount,
+  // doubling the initial /api/graph request (see issue #2158). When the context
+  // (factType/bank/document/chunk) changes we drop the now-meaningless scope
+  // filter and feed the cleared value straight into the same reload, so the
+  // scope reset never triggers a second fetch.
+  const contextKeyRef = useRef<string | null>(null);
+  const skipScopeResetReload = useRef(false);
+  const lastAutoLoadSig = useRef<string | null>(null);
   useEffect(() => {
-    if (currentBank) {
-      if (compactMode || viewMode !== "timeline") {
-        loadData(undefined, searchQuery || undefined, tagFilters.length > 0 ? tagFilters : undefined);
-      }
-      if (viewMode === "timeline") {
-        loadTimelineData(0);
-      }
+    if (!currentBank) return;
+    // The previous run already issued the reload with scope=null; this run is
+    // only the echo of our own setSelectedScope(null), so skip it.
+    if (skipScopeResetReload.current) {
+      skipScopeResetReload.current = false;
+      return;
     }
-  }, [tagFilters]);
+    const contextKey = `${factType} ${currentBank} ${documentId ?? ""} ${chunkId ?? ""}`;
+    const contextChanged = contextKeyRef.current !== contextKey;
+    contextKeyRef.current = contextKey;
 
-  // Auto-load data when component mounts or factType/currentBank changes
-  useEffect(() => {
-    if (currentBank) {
-      if (compactMode || viewMode !== "timeline") {
-        loadData();
-      }
-      setTimelineData(null);
-      setTimelinePage(1);
+    let scope = selectedScope;
+    if (contextChanged && selectedScope !== null) {
+      scope = null;
+      skipScopeResetReload.current = true;
+      setSelectedScope(null);
     }
-  }, [factType, currentBank, documentId, chunkId, compactMode, viewMode]);
-
-  useEffect(() => {
-    if (currentBank && viewMode === "timeline") {
+    const { tags, match } = resolveTagQuery(scope);
+    // Collapse identical consecutive auto-loads into a single request. This makes
+    // the effect idempotent, so React's mount-effect double-invoke (dev
+    // StrictMode, and any redundant re-render) can't re-issue the same /api/graph
+    // query. Manual reloads (search, load-more, consolidation poll) call loadData
+    // directly and intentionally bypass this guard.
+    const sig = JSON.stringify([contextKey, tags ?? null, match ?? null, viewMode]);
+    if (sig === lastAutoLoadSig.current) return;
+    lastAutoLoadSig.current = sig;
+    if (compactMode || viewMode !== "timeline") {
+      loadData(undefined, searchQuery || undefined, tags, match);
+    }
+    if (viewMode === "timeline") {
       loadTimelineData(0);
     }
-  }, [viewMode, currentBank, factType, documentId, chunkId]);
+  }, [factType, currentBank, documentId, chunkId, tagFilters, selectedScope, viewMode, compactMode]);
+
+  // Load the available observation scopes for the scope filter dropdown.
+  const loadScopes = useCallback(async () => {
+    if (!currentBank || factType !== "observation") {
+      setScopes([]);
+      return;
+    }
+    try {
+      const resp = await client.listObservationScopes(currentBank);
+      setScopes(resp.scopes ?? []);
+    } catch {
+      setScopes([]);
+    }
+  }, [currentBank, factType]);
+
+  useEffect(() => {
+    loadScopes();
+  }, [loadScopes]);
+
+  // While consolidation is in progress, poll so the observations + scopes (and
+  // the "In Sync" badge) refresh live instead of showing a stale, one-shot read
+  // (bank stats are also cached for up to 60s, so a single fetch can lag well
+  // behind reality). Silent reloads avoid flashing the spinner. The effect only
+  // restarts when consolidation starts/stops, not on every tick.
+  const isConsolidating =
+    factType === "observation" && (consolidationStatus?.pending_consolidation ?? 0) > 0;
+  useEffect(() => {
+    if (!isConsolidating || !currentBank) return;
+    const id = setInterval(() => {
+      const { tags, match } = resolveTagQuery();
+      loadData(undefined, searchQuery || undefined, tags, match, true);
+      loadScopes();
+    }, 4000);
+    return () => clearInterval(id);
+  }, [isConsolidating, currentBank]);
 
   // Enforce 50 node limit to prevent UI instability, default to 20 or max whichever is smaller
   useEffect(() => {
@@ -414,17 +584,15 @@ export function DataView({
       {loading && !data && !timelineOnly ? (
         <div className="text-center py-12">
           <RefreshCw className="w-8 h-8 mx-auto mb-3 text-muted-foreground animate-spin" />
-          <p className="text-muted-foreground">Loading memories...</p>
+          <p className="text-muted-foreground">{t("loadingMemories")}</p>
         </div>
       ) : data && data.total_units === 0 && !timelineOnly ? (
         <div className="text-center py-20">
           <FileText className="w-10 h-10 mx-auto mb-4 text-muted-foreground/50" />
-          <h3 className="text-base font-medium text-foreground mb-1">No memories</h3>
+          <h3 className="text-base font-medium text-foreground mb-1">{t("noMemoriesYet")}</h3>
           {!documentId && !chunkId && (
             <>
-              <p className="text-sm text-muted-foreground mb-6">
-                Add a document to start building this memory bank.
-              </p>
+              <p className="text-sm text-muted-foreground mb-6">{t("noMemoriesDescription")}</p>
               <Button
                 variant="default"
                 size="sm"
@@ -435,7 +603,7 @@ export function DataView({
                 }}
               >
                 <Plus className="w-4 h-4" />
-                Add Document
+                {tAddDoc("addDocumentButton")}
               </Button>
             </>
           )}
@@ -463,12 +631,32 @@ export function DataView({
                         executeSearch();
                       }
                     }}
-                    placeholder="Filter by text or context (press Enter)..."
+                    placeholder={t("filterByTextPlaceholder")}
                     className="pl-8 h-9"
                   />
                 </div>
-                {/* Tag input */}
-                <TagFilterInput value={tagFilters} onChange={setTagFilters} bankId={currentBank} />
+                {/* Tag input. Setting a tag filter clears any selected scope
+                    so the two filters never fight over the same query. */}
+                <TagFilterInput
+                  value={tagFilters}
+                  onChange={(next) => {
+                    if (next.length > 0) setSelectedScope(null);
+                    setTagFilters(next);
+                  }}
+                  bankId={currentBank}
+                />
+                {/* Observation scope filter. Selecting a scope clears the
+                    free-form tag filter (mutually exclusive). */}
+                {factType === "observation" && scopes.length > 0 && (
+                  <ObservationScopeFilter
+                    scopes={scopes}
+                    value={selectedScope}
+                    onChange={(scope) => {
+                      if (scope !== null) setTagFilters([]);
+                      setSelectedScope(scope);
+                    }}
+                  />
+                )}
               </div>
             </div>
           )}
@@ -516,18 +704,20 @@ export function DataView({
                   {viewMode === "timeline" ? (
                     timelineData ? (
                       <span>
-                        Page {timelinePage} /{" "}
-                        {Math.max(1, Math.ceil(timelineData.total / timelinePageSize))} -{" "}
-                        {timelineData.total} total memories
+                        {timelinePage} / {Math.max(1, Math.ceil(timelineData.total / timelinePageSize))} -{" "}
+                        {t("timelineMemoriesCount", { count: timelineData.total })}
                       </span>
                     ) : (
-                      <span>{timelineLoading ? "Loading timeline..." : "0 total memories"}</span>
+                      <span>{timelineLoading ? t("loadingMemories") : t("timelineMemoriesCount", { count: 0 })}</span>
                     )
                   ) : searchQuery || tagFilters.length > 0 ? (
-                    `${filteredTableRows.length} matching memories`
+                    t("matchingMemories", { count: filteredTableRows.length })
                   ) : data.table_rows?.length < data.total_units ? (
                     <span>
-                      Showing {data.table_rows?.length ?? 0} of {data.total_units} total memories
+                      {t("showingMemories", {
+                        shown: data.table_rows?.length ?? 0,
+                        total: data.total_units,
+                      })}
                       <button
                         onClick={() => {
                           const newLimit = Math.min(data.total_units, fetchLimit + 1000);
@@ -540,11 +730,11 @@ export function DataView({
                         }}
                         className="ml-2 text-primary hover:underline"
                       >
-                        Load more
+                        {t("loadMore")}
                       </button>
                     </span>
                   ) : (
-                    `${data.total_units} total memories`
+                    t("totalMemories", { count: data.total_units })
                   )}
                 </div>
 
@@ -558,19 +748,27 @@ export function DataView({
                     }`}
                     title={
                       consolidationStatus.pending_consolidation === 0
-                        ? `All memories consolidated${consolidationStatus.last_consolidated_at ? ` (last: ${new Date(consolidationStatus.last_consolidated_at).toLocaleString()})` : ""}`
-                        : `${consolidationStatus.pending_consolidation} memories pending consolidation`
+                        ? consolidationStatus.last_consolidated_at
+                          ? t("allConsolidatedWithDate", {
+                              date: new Date(
+                                consolidationStatus.last_consolidated_at
+                              ).toLocaleString(),
+                            })
+                          : t("allConsolidated")
+                        : t("pendingConsolidation", {
+                            count: consolidationStatus.pending_consolidation,
+                          })
                     }
                   >
                     {consolidationStatus.pending_consolidation === 0 ? (
                       <>
                         <CheckCircle className="w-3 h-3" />
-                        In Sync
+                        {t("inSync")}
                       </>
                     ) : (
                       <>
                         <Clock className="w-3 h-3" />
-                        {consolidationStatus.pending_consolidation} Pending
+                        {t("pendingCount", { count: consolidationStatus.pending_consolidation })}
                         <button
                           onClick={() =>
                             loadData(
@@ -581,7 +779,7 @@ export function DataView({
                           }
                           disabled={loading}
                           className="ml-0.5 opacity-70 hover:opacity-100 disabled:opacity-40 transition-opacity"
-                          title="Refresh observations"
+                          title={t("refreshMemories")}
                         >
                           <RefreshCw className={`w-3 h-3 ${loading ? "animate-spin" : ""}`} />
                         </button>
@@ -600,7 +798,7 @@ export function DataView({
                   }`}
                 >
                   <ScatterChart className="w-4 h-4" />
-                  Constellation
+                  {t("constellation")}
                 </button>
                 <button
                   onClick={() => setViewMode("graph")}
@@ -611,7 +809,7 @@ export function DataView({
                   }`}
                 >
                   <Network className="w-4 h-4" />
-                  Graph
+                  {t("graph")}
                 </button>
                 <button
                   onClick={() => setViewMode("table")}
@@ -622,7 +820,7 @@ export function DataView({
                   }`}
                 >
                   <List className="w-4 h-4" />
-                  Table
+                  {t("table")}
                 </button>
                 <button
                   onClick={() => setViewMode("timeline")}
@@ -633,7 +831,7 @@ export function DataView({
                   }`}
                 >
                   <Calendar className="w-4 h-4" />
-                  Timeline
+                  {t("timeline")}
                 </button>
               </div>
             </div>
@@ -658,7 +856,7 @@ export function DataView({
               <button
                 onClick={() => setShowControlPanel(!showControlPanel)}
                 className="flex-shrink-0 w-5 h-[700px] bg-transparent hover:bg-muted/50 flex items-center justify-center transition-colors"
-                title={showControlPanel ? "Hide panel" : "Show panel"}
+                title={showControlPanel ? t("hidePanel") : t("showPanel")}
               >
                 {showControlPanel ? (
                   <ChevronRight className="w-3 h-3 text-muted-foreground/60" />
@@ -685,7 +883,9 @@ export function DataView({
                     <div className="p-4 space-y-5">
                       {/* Legend & Stats */}
                       <div>
-                        <h3 className="text-sm font-semibold mb-3 text-foreground">Graph</h3>
+                        <h3 className="text-sm font-semibold mb-3 text-foreground">
+                          {t("graphTitle")}
+                        </h3>
                         <div className="space-y-2">
                           {/* Nodes */}
                           <div className="flex items-center justify-between text-sm">
@@ -694,7 +894,7 @@ export function DataView({
                                 className="w-3 h-3 rounded-full"
                                 style={{ backgroundColor: "#0074d9" }}
                               />
-                              <span className="text-foreground">Nodes</span>
+                              <span className="text-foreground">{t("nodes")}</span>
                             </div>
                             <span className="font-mono text-foreground">
                               {Math.min(
@@ -706,8 +906,8 @@ export function DataView({
                           </div>
 
                           <div className="text-xs font-medium text-muted-foreground mt-2 mb-1">
-                            Links ({linkStats.total}){" "}
-                            <span className="text-muted-foreground/60">· click to filter</span>
+                            {t("linksWithCount", { count: linkStats.total })}{" "}
+                            <span className="text-muted-foreground/60">{t("clickToFilter")}</span>
                           </div>
                           <button
                             onClick={() => toggleLinkType("semantic")}
@@ -719,7 +919,7 @@ export function DataView({
                           >
                             <div className="flex items-center gap-2">
                               <div className="w-4 h-0.5 bg-[#0074d9]" />
-                              <span className="text-foreground">Semantic</span>
+                              <span className="text-foreground">{t("semantic")}</span>
                             </div>
                             <span
                               className={`font-mono ${linkStats.semantic === 0 ? "text-destructive" : "text-foreground"}`}
@@ -737,7 +937,7 @@ export function DataView({
                           >
                             <div className="flex items-center gap-2">
                               <div className="w-4 h-0.5 bg-[#009296]" />
-                              <span className="text-foreground">Temporal</span>
+                              <span className="text-foreground">{t("temporal")}</span>
                             </div>
                             <span
                               className={`font-mono ${linkStats.temporal === 0 ? "text-destructive" : "text-foreground"}`}
@@ -755,7 +955,7 @@ export function DataView({
                           >
                             <div className="flex items-center gap-2">
                               <div className="w-4 h-0.5 bg-[#f59e0b]" />
-                              <span className="text-foreground">Entity</span>
+                              <span className="text-foreground">{t("entity")}</span>
                             </div>
                             <span className="font-mono text-foreground">{linkStats.entity}</span>
                           </button>
@@ -769,7 +969,7 @@ export function DataView({
                           >
                             <div className="flex items-center gap-2">
                               <div className="w-4 h-0.5 bg-[#8b5cf6]" />
-                              <span className="text-foreground">Causal</span>
+                              <span className="text-foreground">{t("causal")}</span>
                             </div>
                             <span
                               className={`font-mono ${linkStats.causal === 0 ? "text-muted-foreground" : "text-foreground"}`}
@@ -792,11 +992,13 @@ export function DataView({
 
                       {/* Controls Section */}
                       <div>
-                        <h3 className="text-sm font-semibold mb-3 text-foreground">Display</h3>
+                        <h3 className="text-sm font-semibold mb-3 text-foreground">
+                          {t("displayTitle")}
+                        </h3>
                         <div className="space-y-4">
                           <div className="flex items-center justify-between">
                             <Label htmlFor="show-labels" className="text-sm text-foreground">
-                              Show labels
+                              {t("showLabels")}
                             </Label>
                             <Switch
                               id="show-labels"
@@ -811,11 +1013,13 @@ export function DataView({
 
                       {/* Limits Section */}
                       <div>
-                        <h3 className="text-sm font-semibold mb-3 text-foreground">Performance</h3>
+                        <h3 className="text-sm font-semibold mb-3 text-foreground">
+                          {t("performanceTitle")}
+                        </h3>
                         <div className="space-y-4">
                           <div>
                             <div className="flex items-center justify-between mb-2">
-                              <Label className="text-sm text-foreground">Max nodes</Label>
+                              <Label className="text-sm text-foreground">{t("maxNodes")}</Label>
                               <span className="text-xs text-muted-foreground">
                                 {graph2DData.nodes.length > 50
                                   ? `${maxNodes ?? 50} / ${graph2DData.nodes.length}`
@@ -845,11 +1049,10 @@ export function DataView({
                             />
                           </div>
                           <p className="text-xs text-muted-foreground">
-                            All links between visible nodes are shown.
+                            {t("allLinksVisible")}
                             {graph2DData.nodes.length > 50 && (
                               <span className="block text-amber-600 dark:text-amber-400 mt-1">
-                                ⚠️ Limited to 50 nodes for performance. Total:{" "}
-                                {graph2DData.nodes.length}
+                                {t("limitedTo50Nodes", { count: graph2DData.nodes.length })}
                               </span>
                             )}
                           </p>
@@ -860,7 +1063,7 @@ export function DataView({
 
                       {/* Hint */}
                       <div className="text-xs text-muted-foreground/60 text-center pt-2">
-                        Click a node to see details
+                        {t("clickNodeForDetails")}
                       </div>
                     </div>
                   )}
@@ -880,13 +1083,30 @@ export function DataView({
                   nodeColorFn={nodeColorFn}
                   linkColorFn={linkColorFn}
                   nodeSizeFn={factType === "observation" ? observationNodeSizeFn : undefined}
-                  sizeLegendLabel={factType === "observation" ? "source facts" : undefined}
-                  nodeHeatFn={recencyLookup ? recencyHeatFn : undefined}
+                  sizeLegendLabel={factType === "observation" ? t("sourceFactsLabel") : undefined}
+                  clusterKeyFn={
+                    factType === "observation" && groupByScope ? scopeClusterKeyFn : undefined
+                  }
+                  clusterColorFn={
+                    factType === "observation" && groupByScope ? scopeClusterColorFn : undefined
+                  }
+                  clusterLabelFn={
+                    factType === "observation" && groupByScope ? scopeClusterLabelFn : undefined
+                  }
+                  // When grouping by scope, color encodes scope (not recency), so
+                  // suppress the recency heat to avoid a misleading legend.
+                  nodeHeatFn={
+                    !(factType === "observation" && groupByScope) && recencyLookup
+                      ? recencyHeatFn
+                      : undefined
+                  }
                   heatLegendLabel={
-                    recencyLookup ? `recency · ${RECENCY_BASIS_LABEL[recencyBasis]}` : undefined
+                    !(factType === "observation" && groupByScope) && recencyLookup
+                      ? t("recencyLabel", { basis: RECENCY_BASIS_LABEL[recencyBasis] })
+                      : undefined
                   }
                   heatLegendEndpoints={
-                    recencyLookup
+                    !(factType === "observation" && groupByScope) && recencyLookup
                       ? [
                           new Date(recencyLookup.minT).toISOString().slice(0, 10),
                           new Date(recencyLookup.maxT).toISOString().slice(0, 10),
@@ -902,7 +1122,7 @@ export function DataView({
                   <button
                     onClick={() => setShowControlPanel(!showControlPanel)}
                     className="flex-shrink-0 w-5 h-[700px] bg-transparent hover:bg-muted/50 flex items-center justify-center transition-colors"
-                    title={showControlPanel ? "Hide panel" : "Show panel"}
+                    title={showControlPanel ? t("hidePanel") : t("showPanel")}
                   >
                     {showControlPanel ? (
                       <ChevronRight className="w-3 h-3 text-muted-foreground" />
@@ -924,32 +1144,47 @@ export function DataView({
                       ) : (
                         <div className="p-4 space-y-4">
                           <h3 className="text-sm font-semibold text-foreground">
-                            Constellation View
+                            {t("constellationViewTitle")}
                           </h3>
                           <p className="text-xs text-muted-foreground">
-                            Canvas-rendered memory map with spatial label deconfliction. Scroll to
-                            zoom, drag to pan, hover to explore entity connections. Click a memory
-                            to view details.
+                            {t("constellationViewDescription")}
                           </p>
-                          <div className="space-y-2 pt-2">
-                            <h4 className="text-xs font-medium text-muted-foreground">Color by</h4>
-                            <Select
-                              value={recencyBasis}
-                              onValueChange={(v) => setRecencyBasis(v as RecencyBasis)}
-                            >
-                              <SelectTrigger className="h-8 w-full text-xs">
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="mentioned_at">Mentioned</SelectItem>
-                                <SelectItem value="occurred_start">Occurred (start)</SelectItem>
-                                <SelectItem value="occurred_end">Occurred (end)</SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </div>
+                          {factType === "observation" && (
+                            <div className="flex items-center justify-between gap-2 pt-2">
+                              <div className="flex items-center gap-1.5">
+                                <Layers className="w-3.5 h-3.5 text-muted-foreground" />
+                                <h4 className="text-xs font-medium text-muted-foreground">
+                                  {t("groupByScope")}
+                                </h4>
+                              </div>
+                              <Switch checked={groupByScope} onCheckedChange={setGroupByScope} />
+                            </div>
+                          )}
+                          {!(factType === "observation" && groupByScope) && (
+                            <div className="space-y-2 pt-2">
+                              <h4 className="text-xs font-medium text-muted-foreground">
+                                {t("colorBy")}
+                              </h4>
+                              <Select
+                                value={recencyBasis}
+                                onValueChange={(v) => setRecencyBasis(v as RecencyBasis)}
+                              >
+                                <SelectTrigger className="h-8 w-full text-xs">
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="mentioned_at">{t("mentioned")}</SelectItem>
+                                  <SelectItem value="occurred_start">
+                                    {t("occurredStart")}
+                                  </SelectItem>
+                                  <SelectItem value="occurred_end">{t("occurredEnd")}</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          )}
                           <div className="space-y-2 pt-2">
                             <h4 className="text-xs font-medium text-muted-foreground">
-                              Link types
+                              {t("linkTypes")}
                             </h4>
                             {Object.entries({
                               semantic: "#0074d9",
@@ -979,11 +1214,11 @@ export function DataView({
                           </div>
                           <div className="text-xs text-muted-foreground space-y-1 pt-2">
                             <div>
-                              Nodes:{" "}
+                              {t("nodes")}:{" "}
                               <span className="text-foreground">{graph2DData.nodes.length}</span>
                             </div>
                             <div>
-                              Links:{" "}
+                              {t("links")}:{" "}
                               <span className="text-foreground">{graph2DData.links.length}</span>
                             </div>
                           </div>
@@ -998,6 +1233,41 @@ export function DataView({
 
           {!compactMode && viewMode === "table" && (
             <div>
+              {factType !== "observation" && (
+                <div className="flex items-center gap-2 mb-3">
+                  <div className="flex items-center gap-1 bg-muted rounded-lg p-1">
+                    <button
+                      onClick={() => {
+                        setShowInvalidated(false);
+                        setCurrentPage(1);
+                      }}
+                      className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
+                        !showInvalidated
+                          ? "bg-background text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {t("filterActive")}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setShowInvalidated(true);
+                        setCurrentPage(1);
+                      }}
+                      className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
+                        showInvalidated
+                          ? "bg-background text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {t("filterInvalidated")}
+                    </button>
+                  </div>
+                  {showInvalidated && (
+                    <span className="text-xs text-muted-foreground">{t("invalidatedHint")}</span>
+                  )}
+                </div>
+              )}
               <div className="w-full">
                 <div className="pb-4">
                   {filteredTableRows.length > 0 ? (
@@ -1015,22 +1285,24 @@ export function DataView({
                                 <TableHead
                                   className={factType === "observation" ? "w-[35%]" : "w-[38%]"}
                                 >
-                                  {factType === "observation" ? "Observation" : "Memory"}
+                                  {factType === "observation"
+                                    ? t("columnObservation")
+                                    : t("columnMemory")}
                                 </TableHead>
-                                <TableHead className="w-[15%]">Entities</TableHead>
-                                <TableHead className="w-[15%]">Tags</TableHead>
+                                <TableHead className="w-[15%]">{t("columnEntities")}</TableHead>
+                                <TableHead className="w-[15%]">{t("columnTags")}</TableHead>
                                 {factType === "observation" && (
-                                  <TableHead className="w-[10%]">Sources</TableHead>
+                                  <TableHead className="w-[10%]">{t("columnSources")}</TableHead>
                                 )}
                                 <TableHead
                                   className={factType === "observation" ? "w-[12%]" : "w-[16%]"}
                                 >
-                                  Occurred
+                                  {t("columnOccurred")}
                                 </TableHead>
                                 <TableHead
                                   className={factType === "observation" ? "w-[13%]" : "w-[16%]"}
                                 >
-                                  Mentioned
+                                  {t("columnMentioned")}
                                 </TableHead>
                               </TableRow>
                             </TableHeader>
@@ -1191,8 +1463,8 @@ export function DataView({
                   ) : (
                     <div className="text-center py-12 text-muted-foreground">
                       {data.table_rows?.length > 0
-                        ? "No memories match your filter"
-                        : "No memories found"}
+                        ? t("noMemoriesMatchFilter")
+                        : t("noMemoriesFound")}
                     </div>
                   )}
                 </div>
@@ -1206,9 +1478,7 @@ export function DataView({
               total={timelineData?.total ?? 0}
               loading={timelineLoading}
               page={timelinePage}
-              totalPages={
-                timelineData ? Math.max(1, Math.ceil(timelineData.total / timelinePageSize)) : 1
-              }
+              totalPages={timelineData ? Math.max(1, Math.ceil(timelineData.total / timelinePageSize)) : 1}
               onPageChange={(page) => {
                 loadTimelineData((page - 1) * timelinePageSize);
               }}
@@ -1220,13 +1490,19 @@ export function DataView({
         <div className="flex items-center justify-center py-20">
           <div className="text-center">
             <div className="text-4xl mb-2">📊</div>
-            <div className="text-sm text-muted-foreground">No data available</div>
+            <div className="text-sm text-muted-foreground">{t("noDataAvailable")}</div>
           </div>
         </div>
       )}
 
       {/* Memory Detail Modal */}
-      <MemoryDetailModal memoryId={modalMemoryId} onClose={() => setModalMemoryId(null)} />
+      <MemoryDetailModal
+        memoryId={modalMemoryId}
+        onClose={() => setModalMemoryId(null)}
+        onChanged={() => {
+          if (showInvalidated) loadInvalidated();
+        }}
+      />
     </div>
   );
 }
@@ -1251,6 +1527,7 @@ function TimelineView({
   onPageChange: (page: number) => void;
   onMemoryClick: (id: string) => void;
 }) {
+  const t = useTranslations("dataView");
   const [granularity, setGranularity] = useState<Granularity>("month");
   const timelineRef = useRef<HTMLDivElement>(null);
 
@@ -1259,16 +1536,15 @@ function TimelineView({
   }, [page]);
 
   // The backend orders the full result set by timeline_at before pagination.
-  // Keep a defensive local sort for the current page and use has_event_date only for the "without dates" count.
+  // Keep a defensive local sort for the current page and count rows with no event date.
   const { sortedItems, itemsWithoutDates } = useMemo(() => {
-    if (!rows || rows.length === 0)
-      return { sortedItems: [], itemsWithoutDates: [] };
+    if (!rows || rows.length === 0) return { sortedItems: [], itemsWithoutDates: [] };
 
     const withDates = rows
       .filter((row) => row.timeline_at)
-      .sort((a: any, b: any) => {
-        const dateA = new Date(a.timeline_at).getTime();
-        const dateB = new Date(b.timeline_at).getTime();
+      .sort((a, b) => {
+        const dateA = new Date(a.timeline_at as string).getTime();
+        const dateB = new Date(b.timeline_at as string).getTime();
         return dateA - dateB;
       });
 
@@ -1372,16 +1648,16 @@ function TimelineView({
 
   if (sortedItems.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-12">
-        <Calendar className="w-12 h-12 text-muted-foreground mb-3" />
-        <div className="text-base font-medium text-foreground mb-1">
-          {loading ? "Loading Timeline..." : "No Timeline Data"}
-        </div>
+        <div className="flex flex-col items-center justify-center py-12">
+          <Calendar className="w-12 h-12 text-muted-foreground mb-3" />
+          <div className="text-base font-medium text-foreground mb-1">
+            {loading ? t("loadingMemories") : t("noTimelineData")}
+          </div>
         <div className="text-xs text-muted-foreground text-center max-w-md">
-          No memories are available for the timeline.
+          {t("noTimelineDataDescription")}
           {itemsWithoutDates.length > 0 && (
             <span className="block mt-1">
-              {itemsWithoutDates.length} memories without dates in Table View.
+              {t("memoriesWithoutDatesInTable", { count: itemsWithoutDates.length })}
             </span>
           )}
         </div>
@@ -1401,10 +1677,10 @@ function TimelineView({
   };
 
   const granularityLabels: Record<Granularity, string> = {
-    year: "Year",
-    month: "Month",
-    week: "Week",
-    day: "Day",
+    year: t("granularityYear"),
+    month: t("granularityMonth"),
+    week: t("granularityWeek"),
+    day: t("granularityDay"),
   };
 
   return (
@@ -1413,10 +1689,11 @@ function TimelineView({
       <div>
         {/* Controls */}
         <div className="flex items-center justify-between mb-3 gap-4">
-          <div className="text-xs text-muted-foreground">
-            {sortedItems.length} memories
-            {total > sortedItems.length && ` loaded of ${total}`}
-            {itemsWithoutDates.length > 0 && ` · ${itemsWithoutDates.length} without dates`}
+            <div className="text-xs text-muted-foreground">
+              {t("timelineMemoriesCount", { count: sortedItems.length })}
+              {total > sortedItems.length && ` loaded of ${total}`}
+              {itemsWithoutDates.length > 0 &&
+                ` ${t("timelineWithoutDates", { count: itemsWithoutDates.length })}`}
             {dateRange && (
               <span className="ml-2 text-foreground">
                 ({dateRange.first.toLocaleDateString("en-US", { month: "short", year: "numeric" })}{" "}
@@ -1434,7 +1711,7 @@ function TimelineView({
                 onClick={zoomOut}
                 disabled={granularity === "year"}
                 className="h-7 w-7 p-0"
-                title="Zoom out"
+                title={t("zoomOut")}
               >
                 <ZoomOut className="h-3 w-3" />
               </Button>
@@ -1447,7 +1724,7 @@ function TimelineView({
                 onClick={zoomIn}
                 disabled={granularity === "day"}
                 className="h-7 w-7 p-0"
-                title="Zoom in"
+                title={t("zoomIn")}
               >
                 <ZoomIn className="h-3 w-3" />
               </Button>
@@ -1461,7 +1738,7 @@ function TimelineView({
                 onClick={() => onPageChange(1)}
                 disabled={page <= 1 || loading}
                 className="h-7 w-7 p-0"
-                title="First"
+                title={t("first")}
               >
                 <ChevronsLeft className="h-3 w-3" />
               </Button>
@@ -1471,7 +1748,7 @@ function TimelineView({
                 onClick={() => onPageChange(page - 1)}
                 disabled={page <= 1 || loading}
                 className="h-7 w-7 p-0"
-                title="Previous"
+                title={t("previous")}
               >
                 <ChevronLeft className="h-3 w-3" />
               </Button>
@@ -1484,7 +1761,7 @@ function TimelineView({
                 onClick={() => onPageChange(page + 1)}
                 disabled={page >= totalPages || loading}
                 className="h-7 w-7 p-0"
-                title="Next"
+                title={t("next")}
               >
                 <ChevronRight className="h-3 w-3" />
               </Button>
@@ -1494,7 +1771,7 @@ function TimelineView({
                 onClick={() => onPageChange(totalPages)}
                 disabled={page >= totalPages || loading}
                 className="h-7 w-7 p-0"
-                title="Last"
+                title={t("last")}
               >
                 <ChevronsRight className="h-3 w-3" />
               </Button>
@@ -1509,15 +1786,14 @@ function TimelineView({
           {timelineGroups.map((group, groupIdx) => (
             <div key={group.key} id={`timeline-group-${groupIdx}`} className="mb-4">
               {/* Group header */}
-              <div
-                className="flex items-center mb-2"
-              >
+              <div className="flex items-center mb-2">
                 <div className="w-[60px] text-right pr-3">
                   <span className="text-xs font-semibold text-primary">{group.label}</span>
                 </div>
                 <div className="w-2 h-2 rounded-full bg-primary z-10" />
                 <span className="ml-2 text-[10px] text-muted-foreground">
-                  {group.items.length} {group.items.length === 1 ? "item" : "items"}
+                  {group.items.length}{" "}
+                  {group.items.length === 1 ? t("timelineItem") : t("timelineItems")}
                 </span>
               </div>
 
@@ -1530,14 +1806,14 @@ function TimelineView({
                     className={`flex items-start cursor-pointer group ${"hover:opacity-80"}`}
                   >
                     {/* Date & Time */}
-                    <div className="w-[60px] text-right pr-3 pt-1 flex-shrink-0">
-                      <div className="text-[10px] text-muted-foreground">
-                        {formatDateTime(item.timeline_at).date}
+                      <div className="w-[60px] text-right pr-3 pt-1 flex-shrink-0">
+                        <div className="text-[10px] text-muted-foreground">
+                          {formatDateTime(item.timeline_at).date}
+                        </div>
+                        <div className="text-[9px] text-muted-foreground/70">
+                          {formatDateTime(item.timeline_at).time}
+                        </div>
                       </div>
-                      <div className="text-[9px] text-muted-foreground/70">
-                        {formatDateTime(item.timeline_at).time}
-                      </div>
-                    </div>
 
                     {/* Connector dot */}
                     <div className="flex-shrink-0 pt-2">
@@ -1557,9 +1833,6 @@ function TimelineView({
                         <p className="text-[10px] text-muted-foreground mt-1 truncate">
                           {item.context}
                         </p>
-                      )}
-                      {item.has_event_date === false && (
-                        <p className="text-[10px] text-muted-foreground mt-1">No event date</p>
                       )}
                       {item.entities && (
                         <div className="flex gap-1 mt-1 flex-wrap">

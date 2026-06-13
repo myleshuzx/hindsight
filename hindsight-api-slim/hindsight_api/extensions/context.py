@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from hindsight_api.engine.interface import MemoryEngineInterface
+    from hindsight_api.webhooks.manager import WebhookManager
 
 
 class ExtensionContext(ABC):
@@ -83,6 +84,8 @@ class DefaultExtensionContext(ExtensionContext):
         self,
         database_url: str,
         memory_engine: "MemoryEngineInterface | None" = None,
+        webhook_manager: "WebhookManager | None" = None,
+        current_schema: str | None = None,
     ):
         """
         Initialize the context.
@@ -90,9 +93,13 @@ class DefaultExtensionContext(ExtensionContext):
         Args:
             database_url: SQLAlchemy database URL for migrations.
             memory_engine: Optional MemoryEngine instance for memory operations.
+            webhook_manager: Optional WebhookManager for firing webhooks.
+            current_schema: Optional current schema name for tenant context.
         """
         self._database_url = database_url
         self._memory_engine = memory_engine
+        self.webhook_manager = webhook_manager
+        self.current_schema = current_schema
 
     async def run_migration(self, schema: str) -> None:
         """Run migrations for a specific schema."""
@@ -146,7 +153,11 @@ class DefaultExtensionContext(ExtensionContext):
 
         # Ensure text search columns/indexes match the configured extension
         await asyncio.to_thread(
-            ensure_text_search_extension, db_url, text_search_extension=config.text_search_extension, schema=schema
+            ensure_text_search_extension,
+            db_url,
+            text_search_extension=config.text_search_extension,
+            pg_search_tokenizer=config.text_search_extension_pg_search_tokenizer,
+            schema=schema,
         )
 
     def get_memory_engine(self) -> "MemoryEngineInterface":

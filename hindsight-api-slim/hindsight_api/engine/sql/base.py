@@ -371,6 +371,7 @@ class SQLDialect(ABC):
         embedding_param: str,
         bank_id_param: str,
         fetch_limit: int,
+        min_similarity: float,
         tags_clause: str = "",
         groups_clause: str = "",
         extra_where: str = "",
@@ -387,6 +388,7 @@ class SQLDialect(ABC):
             embedding_param: Parameter placeholder for query embedding.
             bank_id_param: Parameter placeholder for bank_id.
             fetch_limit: Max rows to fetch (over-fetched for HNSW approximation).
+            min_similarity: Minimum cosine similarity to include.
             tags_clause: Optional WHERE clause fragment for tag filtering.
             groups_clause: Optional WHERE clause fragment for tag group filtering.
             extra_where: Optional additional WHERE clause fragment (e.g. time range filter).
@@ -407,6 +409,8 @@ class SQLDialect(ABC):
         groups_clause: str = "",
         arm_index: int = 0,
         text_search_extension: str = "native",
+        bm25_language: str = "english",
+        bm25_min_score: float = 0.0,
         extra_where: str = "",
     ) -> str:
         """Build a BM25/full-text search subquery arm.
@@ -426,7 +430,14 @@ class SQLDialect(ABC):
             arm_index: Index of this arm in the UNION ALL (used by Oracle for
                        unique SCORE labels).
             text_search_extension: Full-text search backend ("native", "vchord",
-                                   "pg_textsearch"). Only relevant for PostgreSQL.
+                                   "pg_textsearch", "pgroonga"). Only relevant for PostgreSQL.
+            bm25_language: PostgreSQL text search dictionary used by the native
+                           backend (e.g. "english", "french"). Ignored by other backends.
+            bm25_min_score: Minimum BM25 relevance score a row must exceed to be
+                            returned. Gates out non-matching rows on backends whose
+                            operator (e.g. VectorChord) ranks every document instead
+                            of pre-filtering to query-term matches. Backends that
+                            already apply a boolean match gate ignore this.
             extra_where: Optional additional WHERE clause fragment (e.g. time range filter).
         """
         ...

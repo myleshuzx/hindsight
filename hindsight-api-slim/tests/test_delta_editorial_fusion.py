@@ -23,7 +23,10 @@ from hindsight_api import MemoryEngine, RequestContext
 _GEMINI_KEY = os.getenv("HINDSIGHT_GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 _OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 _RUN = os.getenv("HINDSIGHT_RUN_GEMINI_EVALS") == "1" and (bool(_GEMINI_KEY) or bool(_OPENAI_KEY))
-pytestmark = pytest.mark.skipif(not _RUN, reason="Set HINDSIGHT_RUN_GEMINI_EVALS=1 + LLM API key")
+pytestmark = [
+    pytest.mark.skipif(not _RUN, reason="Set HINDSIGHT_RUN_GEMINI_EVALS=1 + LLM API key"),
+    pytest.mark.hs_llm_core,
+]
 
 # ---------------------------------------------------------------------------
 # Test documents — short but representative
@@ -95,10 +98,11 @@ class TestDeltaEditorialFusion:
 
     async def test_delta_fuses_seo_and_brand_voice(
         self,
-        memory: MemoryEngine,
+        memory_real_llm: MemoryEngine,
         request_context: RequestContext,
     ):
         bank_id = f"test-editorial-{uuid.uuid4().hex[:8]}"
+        memory = memory_real_llm
         await memory.get_bank_profile(bank_id, request_context=request_context)
 
         try:
@@ -122,22 +126,30 @@ class TestDeltaEditorialFusion:
 
             # Phase 1: Ingest SEO best practices
             await memory.retain_async(
-                bank_id=bank_id, content=SEO_BEST_PRACTICES,
-                document_id="seo-best-practices", request_context=request_context,
+                bank_id=bank_id,
+                content=SEO_BEST_PRACTICES,
+                document_id="seo-best-practices",
+                request_context=request_context,
             )
             mm_after_seo = await memory.refresh_mental_model(
-                bank_id=bank_id, mental_model_id=mm_id, request_context=request_context,
+                bank_id=bank_id,
+                mental_model_id=mm_id,
+                request_context=request_context,
             )
             seo_content = mm_after_seo["content"]
             assert len(seo_content) > 100, f"First refresh produced too little content: {len(seo_content)} chars"
 
             # Phase 2: Ingest brand voice -> delta refresh
             await memory.retain_async(
-                bank_id=bank_id, content=BRAND_VOICE,
-                document_id="brand-voice", request_context=request_context,
+                bank_id=bank_id,
+                content=BRAND_VOICE,
+                document_id="brand-voice",
+                request_context=request_context,
             )
             mm_after_brand = await memory.refresh_mental_model(
-                bank_id=bank_id, mental_model_id=mm_id, request_context=request_context,
+                bank_id=bank_id,
+                mental_model_id=mm_id,
+                request_context=request_context,
             )
             fused = mm_after_brand["content"]
             rr = mm_after_brand.get("reflect_response") or {}
@@ -152,8 +164,7 @@ class TestDeltaEditorialFusion:
                 "vocabulary rules": ["jargon", "leverage", "empower", "forbidden"],
             }.items():
                 assert any(s in fused_lower for s in signals), (
-                    f"Brand voice concept '{concept}' missing (looked for {signals}).\n"
-                    f"Fused content:\n{fused[:500]}"
+                    f"Brand voice concept '{concept}' missing (looked for {signals}).\nFused content:\n{fused[:500]}"
                 )
 
             # SEO concepts still present (not wiped by delta)
@@ -163,8 +174,7 @@ class TestDeltaEditorialFusion:
                 "seo": ["meta", "e-e-a-t", "seo", "search"],
             }.items():
                 assert any(s in fused_lower for s in signals), (
-                    f"SEO concept '{concept}' missing (looked for {signals}).\n"
-                    f"Fused content:\n{fused[:500]}"
+                    f"SEO concept '{concept}' missing (looked for {signals}).\nFused content:\n{fused[:500]}"
                 )
 
             # Brand voice overrides generic tone
@@ -173,15 +183,9 @@ class TestDeltaEditorialFusion:
             )
 
             # No duplicate paragraphs
-            lines = [
-                ln.strip() for ln in fused.split("\n")
-                if ln.strip() and not ln.strip().startswith("#")
-            ]
+            lines = [ln.strip() for ln in fused.split("\n") if ln.strip() and not ln.strip().startswith("#")]
             dupes = {line: cnt for line, cnt in Counter(lines).items() if cnt > 1}
-            assert not dupes, (
-                "Duplicate paragraphs:\n" +
-                "\n".join(f"  [{c}x] {t[:80]}" for t, c in dupes.items())
-            )
+            assert not dupes, "Duplicate paragraphs:\n" + "\n".join(f"  [{c}x] {t[:80]}" for t, c in dupes.items())
 
             # based_on accumulates from both docs
             obs_count = len(rr.get("based_on", {}).get("observation", []))

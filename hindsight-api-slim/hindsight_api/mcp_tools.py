@@ -44,11 +44,14 @@ _ALL_TOOLS: frozenset[str] = frozenset(
         "update_mental_model",
         "delete_mental_model",
         "refresh_mental_model",
+        "clear_mental_model",
         "list_directives",
         "create_directive",
         "delete_directive",
         "list_memories",
         "get_memory",
+        "update_memory",
+        "invalidate_memory",
         "list_documents",
         "get_document",
         "delete_document",
@@ -221,11 +224,14 @@ def register_mcp_tools(
         "update_mental_model",
         "delete_mental_model",
         "refresh_mental_model",
+        "clear_mental_model",
         "list_directives",
         "create_directive",
         "delete_directive",
         "list_memories",
         "get_memory",
+        "update_memory",
+        "invalidate_memory",
         "list_documents",
         "get_document",
         "delete_document",
@@ -277,6 +283,9 @@ def register_mcp_tools(
     if "refresh_mental_model" in tools_to_register:
         _register_refresh_mental_model(mcp, memory, config)
 
+    if "clear_mental_model" in tools_to_register:
+        _register_clear_mental_model(mcp, memory, config)
+
     # Directive tools
     if "list_directives" in tools_to_register:
         _register_list_directives(mcp, memory, config)
@@ -293,6 +302,12 @@ def register_mcp_tools(
 
     if "get_memory" in tools_to_register:
         _register_get_memory(mcp, memory, config)
+
+    if "update_memory" in tools_to_register:
+        _register_update_memory(mcp, memory, config)
+
+    if "invalidate_memory" in tools_to_register:
+        _register_invalidate_memory(mcp, memory, config)
 
     # Document tools
     if "list_documents" in tools_to_register:
@@ -438,6 +453,7 @@ _AUDITABLE_MCP_TOOLS: frozenset[str] = frozenset(
         "update_mental_model",
         "delete_mental_model",
         "refresh_mental_model",
+        "clear_mental_model",
         "create_directive",
         "delete_directive",
         "delete_document",
@@ -793,7 +809,8 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
                     {"tags": [...], "match": "any_strict"} or compound {"and": [...]}, {"or": [...]}, {"not": {...}}.
                     Example: [{"not": {"tags": ["closeout"], "match": "any_strict"}}] excludes memories tagged closeout.
                     Mutually exclusive with tags.
-                query_timestamp: Temporal context for the query (ISO format, e.g., '2024-01-15T10:30:00Z'). Helps retrieve time-relevant memories.
+                query_timestamp: Temporal context for the query (ISO format, e.g., '2024-01-15T10:30:00Z').
+                    Anchors relative temporal expressions and recency scoring.
                 bank_id: Optional bank to search in (defaults to session bank). Use for cross-bank operations.
             """
             try:
@@ -863,7 +880,8 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
                     {"tags": [...], "match": "any_strict"} or compound {"and": [...]}, {"or": [...]}, {"not": {...}}.
                     Example: [{"not": {"tags": ["closeout"], "match": "any_strict"}}] excludes memories tagged closeout.
                     Mutually exclusive with tags.
-                query_timestamp: Temporal context for the query (ISO format, e.g., '2024-01-15T10:30:00Z'). Helps retrieve time-relevant memories.
+                query_timestamp: Temporal context for the query (ISO format, e.g., '2024-01-15T10:30:00Z').
+                    Anchors relative temporal expressions and recency scoring.
             """
             try:
                 target_bank = config.bank_id_resolver()
@@ -1773,6 +1791,98 @@ def _register_refresh_mental_model(mcp: FastMCP, memory: MemoryEngine, config: M
                 return {"error": str(e)}
 
 
+def _register_clear_mental_model(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig) -> None:
+    """Register the clear_mental_model tool."""
+
+    if config.include_bank_id_param:
+
+        @mcp.tool()
+        async def clear_mental_model(
+            mental_model_id: str,
+            bank_id: str | None = None,
+        ) -> str:
+            """
+            Clear a mental model's content so the next refresh performs a full re-synthesis.
+
+            This is useful for delta-mode models that have accumulated drift over many
+            incremental refreshes. After clearing, call refresh_mental_model to trigger
+            a clean full rebuild.
+
+            Args:
+                mental_model_id: The ID of the mental model to clear
+                bank_id: Optional bank (defaults to session bank). Use for cross-bank operations.
+            """
+            try:
+                target_bank = bank_id or config.bank_id_resolver()
+                if target_bank is None:
+                    return '{"error": "No bank_id configured"}'
+
+                result = await memory.clear_mental_model(
+                    bank_id=target_bank,
+                    mental_model_id=mental_model_id,
+                    request_context=_get_request_context(config),
+                )
+                if result is None:
+                    return json.dumps({"error": f"Mental model '{mental_model_id}' not found"})
+                return json.dumps(
+                    {
+                        "mental_model_id": result["id"],
+                        "status": "cleared",
+                        "message": f"Mental model '{mental_model_id}' content cleared. Call refresh_mental_model to rebuild.",
+                    }
+                )
+            except OperationValidationError as e:
+                logger.warning(f"Operation rejected: {e}")
+                return json.dumps({"error": str(e)})
+            except ValueError as e:
+                return json.dumps({"error": str(e)})
+            except Exception as e:
+                logger.error(f"Error clearing mental model: {e}", exc_info=True)
+                return f'{{"error": "{e}"}}'
+
+    else:
+
+        @mcp.tool()
+        async def clear_mental_model(
+            mental_model_id: str,
+        ) -> dict:
+            """
+            Clear a mental model's content so the next refresh performs a full re-synthesis.
+
+            This is useful for delta-mode models that have accumulated drift over many
+            incremental refreshes. After clearing, call refresh_mental_model to trigger
+            a clean full rebuild.
+
+            Args:
+                mental_model_id: The ID of the mental model to clear
+            """
+            try:
+                target_bank = config.bank_id_resolver()
+                if target_bank is None:
+                    return {"error": "No bank_id configured"}
+
+                result = await memory.clear_mental_model(
+                    bank_id=target_bank,
+                    mental_model_id=mental_model_id,
+                    request_context=_get_request_context(config),
+                )
+                if result is None:
+                    return {"error": f"Mental model '{mental_model_id}' not found"}
+                return {
+                    "mental_model_id": result["id"],
+                    "status": "cleared",
+                    "message": f"Mental model '{mental_model_id}' content cleared. Call refresh_mental_model to rebuild.",
+                }
+            except OperationValidationError as e:
+                logger.warning(f"Operation rejected: {e}")
+                return {"error": str(e)}
+            except ValueError as e:
+                return {"error": str(e)}
+            except Exception as e:
+                logger.error(f"Error clearing mental model: {e}", exc_info=True)
+                return {"error": str(e)}
+
+
 # =========================================================================
 # DIRECTIVE TOOLS
 # =========================================================================
@@ -2190,6 +2300,206 @@ def _register_get_memory(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsCon
                 return {"error": str(e)}
             except Exception as e:
                 logger.error(f"Error getting memory: {e}", exc_info=True)
+                return {"error": str(e)}
+
+
+def _register_update_memory(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig) -> None:
+    """Register the update_memory (edit) tool."""
+
+    _EDIT_DOC = """
+            Edit a memory unit to correct what was extracted.
+
+            Pass any of text / context / occurred_start / occurred_end / fact_type /
+            entities. For context and the dates, "" clears the field and omitting it
+            leaves it unchanged; entities replaces the fact's entity set ([] detaches
+            all). The memory is re-embedded and its derived observations, links, and
+            graph are recomputed automatically.
+
+            Only raw world/experience facts can be edited; observations are derived.
+            To retire or restore a fact, use invalidate_memory instead.
+    """
+
+    if config.include_bank_id_param:
+
+        @mcp.tool()
+        async def update_memory(
+            memory_id: str,
+            text: str | None = None,
+            context: str | None = None,
+            occurred_start: str | None = None,
+            occurred_end: str | None = None,
+            fact_type: str | None = None,
+            entities: list[str] | None = None,
+            bank_id: str | None = None,
+        ) -> str:
+            f"""{_EDIT_DOC}
+            Args:
+                memory_id: The ID of the memory unit to edit.
+                bank_id: Optional bank (defaults to session bank). Use for cross-bank operations.
+            """
+            try:
+                target_bank = bank_id or config.bank_id_resolver()
+                if target_bank is None:
+                    return '{"error": "No bank_id configured"}'
+
+                result = await memory.update_memory_unit(
+                    target_bank,
+                    memory_id,
+                    text=text,
+                    context=context,
+                    occurred_start=occurred_start,
+                    occurred_end=occurred_end,
+                    new_fact_type=fact_type,
+                    entities=entities,
+                    request_context=_get_request_context(config),
+                )
+                if result is None:
+                    return json.dumps({"error": f"Memory '{memory_id}' not found"})
+                return json.dumps(result, indent=2, default=str)
+            except OperationValidationError as e:
+                logger.warning(f"Operation rejected: {e}")
+                return json.dumps({"error": str(e)})
+            except ValueError as e:
+                return json.dumps({"error": str(e)})
+            except Exception as e:
+                logger.error(f"Error updating memory: {e}", exc_info=True)
+                return f'{{"error": "{e}"}}'
+
+    else:
+
+        @mcp.tool()
+        async def update_memory(
+            memory_id: str,
+            text: str | None = None,
+            context: str | None = None,
+            occurred_start: str | None = None,
+            occurred_end: str | None = None,
+            fact_type: str | None = None,
+            entities: list[str] | None = None,
+        ) -> dict:
+            f"""{_EDIT_DOC}
+            Args:
+                memory_id: The ID of the memory unit to edit.
+            """
+            try:
+                target_bank = config.bank_id_resolver()
+                if target_bank is None:
+                    return {"error": "No bank_id configured"}
+
+                result = await memory.update_memory_unit(
+                    target_bank,
+                    memory_id,
+                    text=text,
+                    context=context,
+                    occurred_start=occurred_start,
+                    occurred_end=occurred_end,
+                    new_fact_type=fact_type,
+                    entities=entities,
+                    request_context=_get_request_context(config),
+                )
+                if result is None:
+                    return {"error": f"Memory '{memory_id}' not found"}
+                return result
+            except OperationValidationError as e:
+                logger.warning(f"Operation rejected: {e}")
+                return {"error": str(e)}
+            except ValueError as e:
+                return {"error": str(e)}
+            except Exception as e:
+                logger.error(f"Error updating memory: {e}", exc_info=True)
+                return {"error": str(e)}
+
+
+def _register_invalidate_memory(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig) -> None:
+    """Register the invalidate_memory (retire / restore) tool."""
+
+    _INVALIDATE_DOC = """
+            Soft-retire a memory unit (or restore a previously retired one).
+
+            Invalidating moves the fact out of the active set: it's excluded from
+            recall, consolidation, and the knowledge graph, its links are pruned, and
+            its derived observations are recomputed without it — but it's kept for
+            audit and is fully reversible. Pass restore=True to bring it back.
+
+            Only raw world/experience facts can be invalidated; observations are derived.
+    """
+
+    if config.include_bank_id_param:
+
+        @mcp.tool()
+        async def invalidate_memory(
+            memory_id: str,
+            reason: str | None = None,
+            restore: bool = False,
+            bank_id: str | None = None,
+        ) -> str:
+            f"""{_INVALIDATE_DOC}
+            Args:
+                memory_id: The ID of the memory unit to retire (or restore).
+                reason: Optional free-text reason recorded when invalidating.
+                restore: Set True to restore a previously invalidated fact.
+                bank_id: Optional bank (defaults to session bank). Use for cross-bank operations.
+            """
+            try:
+                target_bank = bank_id or config.bank_id_resolver()
+                if target_bank is None:
+                    return '{"error": "No bank_id configured"}'
+
+                result = await memory.update_memory_unit(
+                    target_bank,
+                    memory_id,
+                    state="valid" if restore else "invalidated",
+                    reason=reason,
+                    request_context=_get_request_context(config),
+                )
+                if result is None:
+                    return json.dumps({"error": f"Memory '{memory_id}' not found"})
+                return json.dumps(result, indent=2, default=str)
+            except OperationValidationError as e:
+                logger.warning(f"Operation rejected: {e}")
+                return json.dumps({"error": str(e)})
+            except ValueError as e:
+                return json.dumps({"error": str(e)})
+            except Exception as e:
+                logger.error(f"Error invalidating memory: {e}", exc_info=True)
+                return f'{{"error": "{e}"}}'
+
+    else:
+
+        @mcp.tool()
+        async def invalidate_memory(
+            memory_id: str,
+            reason: str | None = None,
+            restore: bool = False,
+        ) -> dict:
+            f"""{_INVALIDATE_DOC}
+            Args:
+                memory_id: The ID of the memory unit to retire (or restore).
+                reason: Optional free-text reason recorded when invalidating.
+                restore: Set True to restore a previously invalidated fact.
+            """
+            try:
+                target_bank = config.bank_id_resolver()
+                if target_bank is None:
+                    return {"error": "No bank_id configured"}
+
+                result = await memory.update_memory_unit(
+                    target_bank,
+                    memory_id,
+                    state="valid" if restore else "invalidated",
+                    reason=reason,
+                    request_context=_get_request_context(config),
+                )
+                if result is None:
+                    return {"error": f"Memory '{memory_id}' not found"}
+                return result
+            except OperationValidationError as e:
+                logger.warning(f"Operation rejected: {e}")
+                return {"error": str(e)}
+            except ValueError as e:
+                return {"error": str(e)}
+            except Exception as e:
+                logger.error(f"Error invalidating memory: {e}", exc_info=True)
                 return {"error": str(e)}
 
 

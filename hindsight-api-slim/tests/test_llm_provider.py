@@ -26,6 +26,7 @@ pytestmark = pytest.mark.hs_llm_mat
 _PROVIDER = os.environ.get("HINDSIGHT_API_LLM_PROVIDER", "")
 _MODEL = os.environ.get("HINDSIGHT_API_LLM_MODEL", "")
 
+
 def _get_api_key() -> str:
     """Get API key from HINDSIGHT_API_LLM_API_KEY (CI) or provider-specific env var."""
     key = os.environ.get("HINDSIGHT_API_LLM_API_KEY", "")
@@ -54,6 +55,10 @@ def _make_llm() -> LLMProvider:
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(300)
+# Tool-calling output is sampled, so some providers occasionally return zero
+# tool calls even when the prompt clearly asks for one.  Retry to ride out
+# the sampling miss; a persistent break still surfaces after 3 attempts.
+@pytest.mark.flaky(reruns=2, reruns_delay=2)
 async def test_llm_api_methods():
     """
     Test all LLM API methods used by Hindsight at runtime.

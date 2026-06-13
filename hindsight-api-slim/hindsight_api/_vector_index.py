@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -34,7 +35,7 @@ _INDEX_USING_CLAUSES = {
     "pgvector": "USING hnsw (embedding vector_cosine_ops)",
     "pgvectorscale": "USING diskann (embedding vector_cosine_ops) WITH (num_neighbors = 50)",
     "pg_diskann": "USING diskann (embedding vector_cosine_ops) WITH (max_neighbors = 50)",
-    "vchord": "USING vchordrq (embedding vector_l2_ops)",
+    "vchord": "USING vchordrq (embedding vector_cosine_ops)",
     "scann": "USING scann (embedding cosine) WITH (mode = 'AUTO')",
 }
 
@@ -44,6 +45,29 @@ _INDEX_TYPE_KEYWORDS = {
     "pg_diskann": "diskann",
     "vchord": "vchordrq",
     "scann": "scann",
+}
+
+# Per-backend ANN search-time tuning GUCs. Each entry is a tuple of
+# (guc_name, value) pairs the caller can apply with SET or SET LOCAL.
+#
+# - pgvector exposes hnsw.ef_search. The 60 / 200 pair is unchanged from the
+#   pre-dispatcher code (internal benchmarks tuned around our embedding count
+#   and recall floor; see the link_utils / pool init call sites for the
+#   latency-vs-recall framing).
+# - vchord exposes vchordrq.probes, but its shape must match the index's
+#   build.internal.lists hierarchy. VectorChord 1.1 added per-index fallback
+#   parameters for this reason: a session GUC overrides every vchordrq index,
+#   and a single value can be invalid for listless or mixed-layout indexes.
+#   Hindsight's built-in vchord clause does not set lists, so the safe default
+#   is no session-level probe override; deployments that partition vchordrq
+#   indexes should attach probes to the index storage parameters instead.
+# - pgvectorscale / pg_diskann / scann do not expose an equivalent per-statement
+#   knob in the engine today, so the dispatcher returns no statements for them.
+_ANN_TUNING_LOW_LATENCY: dict[str, tuple[tuple[str, str], ...]] = {
+    "pgvector": (("hnsw.ef_search", "60"),),
+}
+_ANN_TUNING_HIGH_RECALL: dict[str, tuple[tuple[str, str], ...]] = {
+    "pgvector": (("hnsw.ef_search", "200"),),
 }
 
 _EXTENSION_INSTALL_SQL = {
@@ -65,6 +89,18 @@ _INSTALL_HINTS = {
     "vchord": "CREATE EXTENSION vchord CASCADE;",
     "scann": "CREATE EXTENSION vector; then CREATE EXTENSION alloydb_scann CASCADE;",
 }
+
+
+def configured_vector_extension() -> str:
+    """Return the user-configured vector backend extension.
+
+    Reads ``HINDSIGHT_API_VECTOR_EXTENSION`` (default ``"pgvector"``) and
+    validates it via :func:`validate_extension`. This is the single source of
+    truth for runtime code that needs to dispatch behaviour by vector backend;
+    callers should prefer this over reading the env var directly, so the
+    default value and the lookup mechanism live in one place.
+    """
+    return validate_extension(os.getenv("HINDSIGHT_API_VECTOR_EXTENSION", "pgvector"))
 
 
 def validate_extension(name: str) -> str:
@@ -113,6 +149,25 @@ def should_defer_index_creation(ext: str, row_count: int) -> bool:
     """Return True when index creation should wait for more embeddings."""
     minimum_rows = minimum_rows_for_index(ext)
     return minimum_rows > 0 and row_count < minimum_rows
+
+
+def ann_search_tuning_settings(ext: str, *, kind: str) -> tuple[tuple[str, str], ...]:
+    """Return per-backend (guc_name, value) pairs for ANN search-time tuning.
+
+    ``kind`` is ``"low_latency"`` for retain-side link probing (smaller probe
+    count, lower recall, lower latency) and ``"high_recall"`` for connection
+    init in the pool (larger probe count, higher recall). Callers wrap each
+    pair with ``SET LOCAL`` or ``SET`` themselves so the same dispatcher works
+    for both transaction-scoped and session-scoped use. Returns an empty tuple
+    for backends without an equivalent knob.
+    """
+    if kind == "low_latency":
+        table = _ANN_TUNING_LOW_LATENCY
+    elif kind == "high_recall":
+        table = _ANN_TUNING_HIGH_RECALL
+    else:
+        raise ValueError(f"Unknown ANN tuning kind: {kind!r}")
+    return table.get(_normalize_resolved(ext), ())
 
 
 def uses_per_bank_vector_indexes(ext: str) -> bool:

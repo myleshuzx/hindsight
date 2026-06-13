@@ -520,7 +520,17 @@ impl ApiClient {
         self.runtime.block_on(async {
             let response = self
                 .client
-                .list_memories(bank_id, None, limit, offset, q, type_filter, None)
+                .list_memories(
+                    bank_id,
+                    None, // consolidation_state
+                    None, // document_id
+                    limit,
+                    offset,
+                    q,
+                    None, // state
+                    type_filter,
+                    None, // authorization
+                )
                 .await?;
             Ok(response.into_inner())
         })
@@ -953,7 +963,11 @@ impl ApiClient {
         _verbose: bool,
     ) -> Result<types::ConsolidationResponse> {
         self.runtime.block_on(async {
-            let response = self.client.trigger_consolidation(bank_id, None).await?;
+            let body = types::ConsolidationRequest::default();
+            let response = self
+                .client
+                .trigger_consolidation(bank_id, None, &body)
+                .await?;
             Ok(response.into_inner())
         })
     }
@@ -1262,8 +1276,8 @@ impl ApiClient {
 
 // Re-export types from the generated client for use in commands
 pub use types::{
-    BankProfileResponse, MemoryItem, MemoryItemTimestamp, RecallRequest, RecallResponse,
-    RecallResult, ReflectRequest, ReflectResponse, RetainRequest,
+    BankProfileResponse, MemoryItem, RecallRequest, RecallResponse, RecallResult, ReflectRequest,
+    ReflectResponse, RetainRequest,
 };
 
 #[cfg(test)]

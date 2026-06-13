@@ -190,9 +190,7 @@ class TestMarkOperationGracefulOnMissingRow:
         await memory._mark_operation_failed(missing_id, "some error", "traceback here")  # no exception
 
     @pytest.mark.asyncio
-    async def test_mark_completed_and_fire_webhook_does_not_raise_when_row_missing(
-        self, memory: MemoryEngine
-    ):
+    async def test_mark_completed_and_fire_webhook_does_not_raise_when_row_missing(self, memory: MemoryEngine):
         missing_id = str(uuid.uuid4())
         await memory._mark_operation_completed_and_fire_webhook(
             operation_id=missing_id,
@@ -265,9 +263,7 @@ class TestConsolidationCheckpoint:
 
 class TestRetainCheckpoint:
     @pytest.mark.asyncio
-    async def test_retain_stops_between_sub_batches_when_cancelled(
-        self, memory: MemoryEngine, request_context
-    ):
+    async def test_retain_stops_between_sub_batches_when_cancelled(self, memory: MemoryEngine, request_context):
         """retain_batch_async returns partial results if _check_op_alive is False between sub-batches."""
         from hindsight_api.config import _get_raw_config
 
@@ -290,9 +286,7 @@ class TestRetainCheckpoint:
                 # Cancel after the first sub-batch completes
                 return check_calls <= 1
 
-            contents = [
-                {"content": f"Memory item {i} about something interesting."} for i in range(4)
-            ]
+            contents = [{"content": f"Memory item {i} about something interesting."} for i in range(4)]
 
             with patch.object(memory, "_check_op_alive", side_effect=_fake_check):
                 result = await memory.retain_batch_async(
@@ -302,9 +296,18 @@ class TestRetainCheckpoint:
                     operation_id=op_id,
                 )
 
-            # Should have stopped early: fewer results than total items
-            assert len(result) < len(contents), (
-                f"Expected early stop but got {len(result)}/{len(contents)} results"
+            # Public contract change in #1571: ``retain_batch_async`` now
+            # always returns one slot per input content. Un-processed
+            # inputs (because of cancellation between sub-batches) come
+            # back as empty lists instead of being omitted from the
+            # result. The cancellation check still has to short-circuit
+            # — assert that fewer than all inputs produced unit_ids.
+            assert len(result) == len(contents), (
+                f"Expected per-input result list (len={len(contents)}), got {len(result)}"
+            )
+            non_empty = [r for r in result if r]
+            assert len(non_empty) < len(contents), (
+                f"Expected early stop (fewer non-empty results than inputs), got {non_empty}"
             )
             assert check_calls >= 1
         finally:

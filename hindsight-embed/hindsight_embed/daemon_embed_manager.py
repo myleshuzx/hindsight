@@ -6,10 +6,12 @@ consolidating daemon lifecycle, profile management, and database URL resolution.
 """
 
 import logging
+import math
 import os
 import platform
 import re
 import subprocess
+import sys
 import sysconfig
 import time
 from pathlib import Path
@@ -22,7 +24,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from .embed_manager import EmbedManager
-from .profile_manager import UI_PORT_OFFSET, ProfileManager, lock_file, resolve_active_profile, unlock_file
+from .profile_manager import ProfileManager, lock_file, unlock_file
 
 logger = logging.getLogger(__name__)
 console = Console(stderr=True)
@@ -30,12 +32,42 @@ console = Console(stderr=True)
 # Suppress noisy httpx logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
+
+def _parse_float_env(name: str, default: float) -> float:
+    """Parse a float environment variable, falling back on invalid values."""
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _safe_non_negative_float(value: float, fallback: float) -> float:
+    """Return a finite non-negative float, or fallback for invalid values."""
+    return value if math.isfinite(value) and value >= 0 else fallback
+
+
+def _safe_positive_float(value: float, fallback: float) -> float:
+    """Return a finite positive float, or fallback for invalid values."""
+    return value if math.isfinite(value) and value > 0 else fallback
+
+
 # Constants
 # Allow CI/Windows to extend the startup budget — pg0-embedded's Windows wheel
 # unpacks and runs initdb on first boot, which takes noticeably longer on cold
 # runners than POSIX.
 DAEMON_STARTUP_TIMEOUT = int(os.getenv("HINDSIGHT_EMBED_DAEMON_STARTUP_TIMEOUT", "180"))
 DEFAULT_DAEMON_IDLE_TIMEOUT = 0  # 0 = disabled (no auto-exit)
+# When another process is concurrently starting the daemon, the TCP port can be
+# bound before /health returns 200. Give that warming daemon a short grace window
+# before treating the listener as stale/foreign and attempting to reclaim it.
+PORT_HEALTH_GRACE_TIMEOUT = _safe_non_negative_float(
+    _parse_float_env("HINDSIGHT_EMBED_PORT_HEALTH_GRACE_TIMEOUT", 30.0),
+    30.0,
+)
+PORT_HEALTH_CHECK_INTERVAL = _safe_positive_float(
+    _parse_float_env("HINDSIGHT_EMBED_PORT_HEALTH_CHECK_INTERVAL", 0.5),
+    0.5,
+)
 
 
 def _detach_popen_kwargs(log_handle: IO[bytes]) -> dict:
@@ -126,12 +158,52 @@ class DaemonEmbedManager(EmbedManager):
         except Exception:
             return False
 
-    def _find_api_command(self) -> list[str]:
-        """Find the command to run hindsight-api."""
-        # Check if we're in development mode
+    def _dev_api_command(self) -> list[str] | None:
+        """Return the dev-mode launch command when running inside the monorepo."""
         dev_api_path = Path(__file__).parent.parent.parent / "hindsight-api-slim"
         if dev_api_path.exists() and (dev_api_path / "pyproject.toml").exists():
             return ["uv", "run", "--project", str(dev_api_path), "--extra", "all", "hindsight-api"]
+        return None
+
+    @staticmethod
+    def _windows_gui_interpreter() -> str | None:
+        """Path to the GUI-subsystem Python (pythonw.exe), or None.
+
+        Returns None on non-Windows, or when pythonw.exe can't be located next
+        to the running interpreter.
+
+        On Windows 11 with Windows Terminal as the default terminal app,
+        spawning the console-subsystem (CUI, subsystem 3) hindsight-api.exe
+        launcher makes ConPTY pop a visible terminal tab on daemon start, even
+        with DETACHED_PROCESS / CREATE_NO_WINDOW (issue #1885). Launching the
+        daemon through the GUI-subsystem (subsystem 2) pythonw.exe interpreter
+        never allocates a console, so no window appears. pythonw.exe sits next
+        to sys.executable, whose environment is the one we just confirmed has
+        hindsight-api installed, so `pythonw.exe -m hindsight_api.main` resolves.
+        """
+        if platform.system() != "Windows":
+            return None
+        pythonw = Path(sys.executable).with_name("pythonw.exe")
+        return str(pythonw) if pythonw.exists() else None
+
+    def _component_version(self, profile: str, env_key: str) -> str:
+        """Resolve a component version: profile .env override > env var > embed version.
+
+        Lets the API and control-plane package versions be pinned per profile
+        (e.g. from the control center), falling back to the process env var and
+        finally the embed's own version so the stack stays in lockstep.
+        """
+        from . import __version__
+
+        override = self._profile_manager.load_profile_config(profile).get(env_key)
+        return override or os.getenv(env_key) or __version__
+
+    def _find_api_command(self, api_version: str) -> list[str]:
+        """Find the command to run hindsight-api (api_version used only for the uvx fallback)."""
+        # Check if we're in development mode
+        dev_command = self._dev_api_command()
+        if dev_command is not None:
+            return dev_command
 
         # Prefer a hindsight-api entry point installed alongside hindsight-embed.
         # Try two strategies:
@@ -146,19 +218,25 @@ class DaemonEmbedManager(EmbedManager):
         scripts_dir = Path(sysconfig.get_path("scripts"))
         candidate = scripts_dir / binary_name
         if candidate.exists():
+            # The console exe lives in sys.executable's scripts dir, so
+            # hindsight_api is importable by the GUI interpreter; prefer it on
+            # Windows to avoid ConPTY popping a terminal tab (issue #1885).
+            gui_python = self._windows_gui_interpreter()
+            if gui_python is not None:
+                return [gui_python, "-m", "hindsight_api.main"]
             return [str(candidate)]
 
-        # --target installs place binaries alongside site-packages contents
+        # --target installs place binaries alongside site-packages contents.
+        # The running interpreter usually can't import hindsight_api here (it's
+        # under the --target dir, not on sys.path), so we can't substitute
+        # pythonw.exe; run the console exe directly.
         package_root = Path(__file__).parent.parent
         for bin_dir in ("bin", "Scripts"):
             candidate = package_root / bin_dir / binary_name
             if candidate.exists():
                 return [str(candidate)]
 
-        # Fall back to uvx for installed version
-        from . import __version__
-
-        api_version = os.getenv("HINDSIGHT_EMBED_API_VERSION", __version__)
+        # Fall back to uvx for the installed version (resolved by the caller).
         return ["uvx", f"hindsight-api@{api_version}"]
 
     @staticmethod
@@ -219,6 +297,40 @@ class DaemonEmbedManager(EmbedManager):
             return True  # Already gone
         return False
 
+    @staticmethod
+    def _port_health_ok(port: int) -> bool:
+        """Return True when the listener on port responds like initialized Hindsight."""
+        try:
+            with httpx.Client(timeout=2) as client:
+                response = client.get(f"http://127.0.0.1:{port}/health")
+                if response.status_code != 200:
+                    return False
+                try:
+                    health = response.json()
+                except Exception:
+                    return False
+                return health.get("status") == "healthy" and health.get("database") == "connected"
+        except Exception:
+            return False
+
+    def _wait_for_port_health(self, port: int, timeout: float | None = None) -> bool:
+        """Wait briefly for a just-bound daemon port to become healthy."""
+        timeout = _safe_non_negative_float(
+            PORT_HEALTH_GRACE_TIMEOUT if timeout is None else timeout,
+            0.0,
+        )
+        interval = _safe_positive_float(PORT_HEALTH_CHECK_INTERVAL, 0.5)
+        deadline = time.monotonic() + timeout
+        while True:
+            if not self._is_port_in_use(port):
+                return False
+            if self._port_health_ok(port):
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(interval, remaining))
+
     def _clear_port(self, port: int) -> bool:
         """
         Ensure the port is free before starting a daemon.
@@ -229,29 +341,27 @@ class DaemonEmbedManager(EmbedManager):
             The caller's "start" is effectively a no-op: the daemon is already up.
             Killing it would race concurrent starts (one process kills the other's
             freshly-started daemon, both rush to rebind the port).
-          * Port occupied but /health is unreachable / non-200 → treat as a stale
-            hindsight daemon (or foreign process) and attempt to reclaim by killing
-            the PID listening on the port. This preserves the original intent of
-            clearing stale daemons from version upgrades.
+          * Port occupied but /health is unreachable, non-200, or does not return
+            Hindsight's initialized health payload → treat as a stale daemon (or
+            foreign process) and attempt to reclaim by killing the PID listening
+            on the port. This preserves the original intent of clearing stale
+            daemons from version upgrades.
           * Kill failed, or non-hindsight process occupying the port → False.
         """
         if not self._is_port_in_use(port):
             return True
 
-        # Port is occupied — check if it's a healthy hindsight daemon.
-        health_ok = False
-        try:
-            with httpx.Client(timeout=2) as client:
-                response = client.get(f"http://127.0.0.1:{port}/health")
-                health_ok = response.status_code == 200
-        except Exception:
-            health_ok = False
-
-        if health_ok:
+        # Port is occupied — check if it's a healthy Hindsight daemon. In
+        # concurrent startup races the socket can bind before /health returns
+        # 200, so wait briefly before deciding the listener is stale/foreign.
+        if self._wait_for_port_health(port):
             logger.debug(f"Port {port} already serving a healthy hindsight daemon; reusing it")
             return True
 
-        # Unhealthy — attempt to reclaim by killing the listener.
+        # Unhealthy after grace window — attempt to reclaim by killing the listener.
+        if not self._is_port_in_use(port):
+            return True
+
         pid = self._find_pid_on_port(port)
         if pid is None:
             logger.warning(f"Port {port} is in use by another process")
@@ -383,7 +493,7 @@ class DaemonEmbedManager(EmbedManager):
         env["HINDSIGHT_API_DAEMON_LOG"] = str(daemon_log)
 
         # Build command
-        cmd = self._find_api_command() + [
+        cmd = self._find_api_command(self._component_version(profile, "HINDSIGHT_EMBED_API_VERSION")) + [
             "--daemon",
             "--idle-timeout",
             str(idle_timeout),
@@ -504,7 +614,7 @@ class DaemonEmbedManager(EmbedManager):
             console.print()
             return False
 
-        except FileNotFoundError as e:
+        except FileNotFoundError:
             error_msg = (
                 f"Command not found: {cmd[0]}\nFull command: {' '.join(cmd)}\n\n"
                 "Install hindsight-api with: pip install hindsight-api"
@@ -540,32 +650,43 @@ class DaemonEmbedManager(EmbedManager):
             api_config = {k: v for k, v in config.items() if k.startswith("HINDSIGHT_API_")}
             if not api_config:
                 return
-            self._profile_manager.create_profile(profile, port, api_config)
+            # Merge onto the existing .env so persisted keys (UI port, idle
+            # timeout, etc.) survive — create_profile overwrites the file, so we
+            # must carry the existing non-alias keys forward.
+            existing = self._profile_manager.load_profile_config(profile)
+            merged = {k: v for k, v in existing.items() if not k.islower()}
+            merged.update(api_config)
+            self._profile_manager.create_profile(profile, port, merged)
         except Exception as e:
             logger.debug(f"Failed to register profile '{profile}' in metadata: {e}")
 
-    def _find_ui_command(self) -> list[str]:
-        """Find the command to run the control plane UI."""
+    def _find_ui_command(self, cp_version: str) -> list[str]:
+        """Find the command to run the control plane UI (cp_version used only for the npx fallback)."""
+        import shutil
+
         # Check if we're in development mode (monorepo)
         dev_cp_path = Path(__file__).parent.parent.parent / "hindsight-control-plane"
         cli_js = dev_cp_path / "bin" / "cli.js"
         if cli_js.exists():
             return ["node", str(cli_js)]
 
-        # Use npx to run the published control plane package
-        from . import __version__
-
-        cp_version = os.getenv("HINDSIGHT_EMBED_CP_VERSION", __version__)
+        # Use npx to run the published control plane package (version resolved by the caller).
         # `npx` prompts before installing missing packages on first run unless `-y` is set.
         # The UI starts in the background with stdout/stderr redirected to a log file, so an
         # interactive prompt would be invisible to users and the health-check loop would time out.
-        return ["npx", "-y", f"@vectorize-io/hindsight-control-plane@{cp_version}"]
+        # On Windows, detached processes may not inherit the parent's PATH, so resolve the
+        # absolute path to npx to avoid "Command not found" errors.
+        npx_path = shutil.which("npx")
+        if npx_path is None:
+            # Fallback to bare command so the FileNotFoundError handler can report it cleanly
+            return ["npx", "-y", f"@vectorize-io/hindsight-control-plane@{cp_version}"]
+        return [npx_path, "-y", f"@vectorize-io/hindsight-control-plane@{cp_version}"]
 
     def get_ui_url(self, profile: str, ui_port: int | None = None, hostname: str | None = None) -> str:
         """Get the URL for the UI serving this profile."""
         if ui_port is None:
             paths = self._profile_manager.resolve_profile_paths(profile)
-            ui_port = paths.port + UI_PORT_OFFSET
+            ui_port = paths.ui_port
         host = hostname or "0.0.0.0"
         return f"http://{host}:{ui_port}"
 
@@ -580,6 +701,27 @@ class DaemonEmbedManager(EmbedManager):
         except Exception:
             return False
 
+    @staticmethod
+    def _ui_port_file(paths) -> Path:
+        """Path of the file recording the UI's actually-bound port (so stop/restart
+        can find it even after the configured port changed). e.g. <name>.ui.port."""
+        return paths.ui_log.with_suffix(".port")
+
+    def _read_recorded_ui_port(self, paths) -> int | None:
+        f = self._ui_port_file(paths)
+        if not f.exists():
+            return None
+        try:
+            return int(f.read_text().strip())
+        except (ValueError, OSError):
+            return None
+
+    def _record_ui_port(self, paths, port: int) -> None:
+        try:
+            self._ui_port_file(paths).write_text(str(port))
+        except OSError:
+            pass
+
     def start_ui(self, profile: str, ui_port: int | None = None, hostname: str = "0.0.0.0") -> bool:
         """Start the control plane UI in background.
 
@@ -593,10 +735,11 @@ class DaemonEmbedManager(EmbedManager):
         """
         paths = self._profile_manager.resolve_profile_paths(profile)
         if ui_port is None:
-            ui_port = paths.port + UI_PORT_OFFSET
+            ui_port = paths.ui_port
 
         if self.is_ui_running(profile, ui_port):
             logger.debug(f"UI already running for profile '{profile}' on port {ui_port}")
+            self._record_ui_port(paths, ui_port)
             return True
 
         profile_label = f"profile '{profile}'" if profile else "default profile"
@@ -613,7 +756,7 @@ class DaemonEmbedManager(EmbedManager):
         ui_log.parent.mkdir(parents=True, exist_ok=True)
 
         # Build command
-        cmd = self._find_ui_command() + [
+        cmd = self._find_ui_command(self._component_version(profile, "HINDSIGHT_EMBED_CP_VERSION")) + [
             "--port",
             str(ui_port),
             "--hostname",
@@ -639,6 +782,7 @@ class DaemonEmbedManager(EmbedManager):
 
                 while time.time() - start_time < 30:
                     if self.is_ui_running(profile, ui_port):
+                        self._record_ui_port(paths, ui_port)
                         log_lines.append(f"✓ UI started at http://127.0.0.1:{ui_port}")
                         log_lines.append(f"Logs: {ui_log}")
                         content = Text("\n".join(log_lines), style="dim")
@@ -714,27 +858,31 @@ class DaemonEmbedManager(EmbedManager):
             True if stopped successfully.
         """
         paths = self._profile_manager.resolve_profile_paths(profile)
-        if ui_port is None:
-            ui_port = paths.port + UI_PORT_OFFSET
+        configured = paths.ui_port if ui_port is None else ui_port
 
-        if not self.is_ui_running(profile, ui_port):
-            logger.debug(f"UI not running for profile '{profile}'")
-            return True
+        # Kill the UI on both the configured port AND the actually-recorded port.
+        # They differ when the UI port was changed while the old UI kept running
+        # on the previous port — otherwise that old process is orphaned.
+        recorded = self._read_recorded_ui_port(paths)
+        targets = {configured}
+        if recorded is not None:
+            targets.add(recorded)
 
-        pid = self._find_pid_on_port(ui_port)
-        if pid is not None:
-            logger.debug(f"Found UI PID {pid} on port {ui_port}")
-            self._kill_process(pid)
-        else:
-            logger.warning(f"Could not find PID for UI port {ui_port}")
+        for port in targets:
+            pid = self._find_pid_on_port(port)
+            if pid is not None:
+                logger.debug(f"Found UI PID {pid} on port {port}")
+                self._kill_process(pid)
 
-        # Wait for health check to fail
+        self._ui_port_file(paths).unlink(missing_ok=True)
+
+        # Wait until nothing on any target port is still listening.
         for _ in range(30):
-            if not self.is_ui_running(profile, ui_port):
+            if not any(self._is_port_in_use(p) for p in targets):
                 return True
             time.sleep(0.1)
 
-        return not self.is_ui_running(profile, ui_port)
+        return not any(self._is_port_in_use(p) for p in targets)
 
     def ensure_running(self, config: dict, profile: str, extra_args: list[str] | None = None) -> bool:
         """

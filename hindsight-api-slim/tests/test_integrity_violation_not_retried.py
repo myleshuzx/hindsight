@@ -87,9 +87,7 @@ async def test_unique_violation_marks_failed_without_retry(memory):
         try:
             await memory.execute_task(task_dict)
         except RetryTaskAt as exc:
-            pytest.fail(
-                f"IntegrityConstraintViolationError must not be retried, but execute_task raised {exc!r}"
-            )
+            pytest.fail(f"IntegrityConstraintViolationError must not be retried, but execute_task raised {exc!r}")
 
     # The operation must be marked 'failed' (not left pending / retrying).
     row = await pool.fetchrow(
@@ -97,9 +95,7 @@ async def test_unique_violation_marks_failed_without_retry(memory):
         operation_id,
     )
     assert row is not None, "Operation row disappeared"
-    assert row["status"] == "failed", (
-        f"Expected status='failed' after integrity violation, got {row['status']!r}"
-    )
+    assert row["status"] == "failed", f"Expected status='failed' after integrity violation, got {row['status']!r}"
     assert row["error_message"] is not None
     assert "pk_chunks" in row["error_message"]
 
@@ -123,7 +119,7 @@ async def test_foreign_key_violation_also_not_retried(memory):
     await _create_pending_operation(pool, bank_id, operation_id)
 
     fk_violation = asyncpg.exceptions.ForeignKeyViolationError(
-        "insert or update on table \"memory_units\" violates foreign key constraint \"fk_bank\""
+        'insert or update on table "memory_units" violates foreign key constraint "fk_bank"'
     )
 
     task_dict = {
@@ -137,9 +133,7 @@ async def test_foreign_key_violation_also_not_retried(memory):
         try:
             await memory.execute_task(task_dict)
         except RetryTaskAt as exc:
-            pytest.fail(
-                f"ForeignKeyViolationError must not be retried, but execute_task raised {exc!r}"
-            )
+            pytest.fail(f"ForeignKeyViolationError must not be retried, but execute_task raised {exc!r}")
 
     row = await pool.fetchrow(
         "SELECT status FROM async_operations WHERE operation_id = $1",
@@ -151,13 +145,33 @@ async def test_foreign_key_violation_also_not_retried(memory):
     await pool.execute("DELETE FROM banks WHERE bank_id = $1", bank_id)
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "embedding 0 has dimension 0; expected 384",
+        "different vector dimensions 384 and 0",
+    ],
+)
+def test_invalid_embedding_dimension_error_is_non_retryable(message):
+    """Embedding dimension mismatches are deterministic and must not be retried.
+
+    PR #1670 validates empty/mismatched embedding vectors before pgvector writes.
+    pgvector may also raise its own dimension-mismatch error if an invalid vector
+    reaches the database layer. In both cases, rerunning the same poisoned
+    embedding response only burns worker slots; a fresh retain request or fixed
+    embedding backend is required.
+    """
+    from hindsight_api.engine.memory_engine import _is_non_retryable_task_error
+
+    assert _is_non_retryable_task_error(RuntimeError(message)) is True
+
+
 @pytest.mark.asyncio
 async def test_non_integrity_error_still_retried(memory):
     """
     Sanity check: non-integrity errors (network errors, timeouts, value errors)
     should STILL use the existing retry path — i.e., raise RetryTaskAt when
-    ``_retry_count < 3``. Only integrity violations are the new non-retryable
-    class.
+    ``_retry_count < 3``. Only deterministic task errors are non-retryable.
     """
     bank_id = f"test-worker-{uuid.uuid4().hex[:8]}"
     operation_id = uuid.uuid4()

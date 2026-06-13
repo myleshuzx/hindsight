@@ -15,6 +15,8 @@ from hindsight_api import LLMConfig
 from hindsight_api.config import _get_raw_config
 from hindsight_api.engine.retain.fact_extraction import extract_facts_from_text
 
+pytestmark = pytest.mark.hs_llm_core
+
 
 class TestCausalRelationsValidation:
     """Tests for causal relations index validation."""
@@ -102,8 +104,7 @@ class TestCausalRelationsValidation:
             for rel in facts[0].causal_relations:
                 # This should never happen due to validation
                 assert False, (
-                    f"First fact should not have causal relations, "
-                    f"but found: target_index={rel.target_fact_index}"
+                    f"First fact should not have causal relations, but found: target_index={rel.target_fact_index}"
                 )
 
     @pytest.mark.asyncio
@@ -137,11 +138,13 @@ class TestCausalRelationsValidation:
         for i, fact in enumerate(facts):
             if fact.causal_relations:
                 for rel in fact.causal_relations:
-                    all_relations.append({
-                        "from_fact": i,
-                        "to_fact": rel.target_fact_index,
-                        "type": rel.relation_type,
-                    })
+                    all_relations.append(
+                        {
+                            "from_fact": i,
+                            "to_fact": rel.target_fact_index,
+                            "type": rel.relation_type,
+                        }
+                    )
 
         # If causal relations were extracted, verify they form a valid chain
         if all_relations:
@@ -224,6 +227,5 @@ class TestCausalRelationsValidation:
             if fact.causal_relations:
                 for rel in fact.causal_relations:
                     assert rel.relation_type in valid_types, (
-                        f"Invalid relation_type '{rel.relation_type}'. "
-                        f"Must be one of: {valid_types}"
+                        f"Invalid relation_type '{rel.relation_type}'. Must be one of: {valid_types}"
                     )
