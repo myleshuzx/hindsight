@@ -336,6 +336,14 @@ class RefreshTagFiltering:
     tag_groups: list[TagGroup] | None
 
 
+@dataclass(frozen=True)
+class ResolvedTimeScope:
+    """Resolved event-time source range for mental model refresh."""
+
+    event_after: datetime
+    event_before: datetime
+
+
 def _resolve_refresh_tag_filtering(
     model_tags: list[str] | None,
     trigger_data: dict[str, Any],
@@ -361,6 +369,56 @@ def _resolve_refresh_tag_filtering(
     trigger_tags_match = trigger_data.get("tags_match")
     tags_match: TagsMatch = trigger_tags_match if trigger_tags_match else ("all_strict" if model_tags else "any")
     return RefreshTagFiltering(tags=model_tags, tags_match=tags_match, tag_groups=None)
+
+
+def _parse_time_scope_day(value: str, field_name: str) -> datetime:
+    """Parse a YYYY-MM-DD value to a timezone-aware UTC midnight datetime."""
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must use YYYY-MM-DD format") from exc
+    return parsed.replace(tzinfo=UTC)
+
+
+def _resolve_mental_model_time_scope(
+    time_scope: dict[str, Any] | None,
+    *,
+    now: datetime | None = None,
+) -> ResolvedTimeScope | None:
+    """Resolve trigger.time_scope into an event-time half-open range.
+
+    Relative ranges include the refresh day. For example, days=30 on 2026-06-13
+    means [2026-05-15T00:00Z, 2026-06-14T00:00Z).
+    """
+    if not time_scope:
+        return None
+
+    scope_type = time_scope.get("type")
+    if scope_type == "absolute":
+        start_raw = time_scope.get("start_date")
+        end_raw = time_scope.get("end_date")
+        if not isinstance(start_raw, str) or not isinstance(end_raw, str):
+            raise ValueError("absolute time_scope requires start_date and end_date")
+        start = _parse_time_scope_day(start_raw, "time_scope.start_date")
+        end = _parse_time_scope_day(end_raw, "time_scope.end_date")
+        if end < start:
+            raise ValueError("time_scope.end_date must be on or after start_date")
+        return ResolvedTimeScope(event_after=start, event_before=end + timedelta(days=1))
+
+    if scope_type == "relative":
+        days = time_scope.get("days")
+        if not isinstance(days, int) or days < 1:
+            raise ValueError("relative time_scope requires days >= 1")
+        base = now or datetime.now(UTC)
+        if base.tzinfo is None:
+            base = base.replace(tzinfo=UTC)
+        today = base.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        return ResolvedTimeScope(
+            event_after=today - timedelta(days=days - 1),
+            event_before=today + timedelta(days=1),
+        )
+
+    raise ValueError("time_scope.type must be 'absolute' or 'relative'")
 
 
 class MemoryEngine(MemoryEngineInterface):
@@ -2661,6 +2719,8 @@ class MemoryEngine(MemoryEngineInterface):
         tag_groups: list[TagGroup] | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        event_after: datetime | None = None,
+        event_before: datetime | None = None,
         _connection_budget: int | None = None,
         _quiet: bool = False,
     ) -> RecallResultModel:
@@ -2808,6 +2868,8 @@ class MemoryEngine(MemoryEngineInterface):
                             tag_groups=tag_groups,
                             created_after=created_after,
                             created_before=created_before,
+                            event_after=event_after,
+                            event_before=event_before,
                             connection_budget=_connection_budget,
                             quiet=_quiet,
                             include_source_facts=include_source_facts,
@@ -2939,6 +3001,8 @@ class MemoryEngine(MemoryEngineInterface):
         tag_groups: list[TagGroup] | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        event_after: datetime | None = None,
+        event_before: datetime | None = None,
         connection_budget: int | None = None,
         quiet: bool = False,
         include_source_facts: bool = False,
@@ -3065,6 +3129,8 @@ class MemoryEngine(MemoryEngineInterface):
                         tag_groups=tag_groups,
                         created_after=created_after,
                         created_before=created_before,
+                        event_after=event_after,
+                        event_before=event_before,
                     )
                     parallel_duration = time.time() - parallel_start
             finally:
@@ -6030,6 +6096,8 @@ class MemoryEngine(MemoryEngineInterface):
         recall_chunks_max_tokens_override: int | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        event_after: datetime | None = None,
+        event_before: datetime | None = None,
         _skip_span: bool = False,
     ) -> ReflectResult:
         """
@@ -6184,6 +6252,8 @@ class MemoryEngine(MemoryEngineInterface):
                 source_facts_max_tokens=reflect_source_facts_max_tokens,
                 created_after=created_after,
                 created_before=created_before,
+                event_after=event_after,
+                event_before=event_before,
             )
 
         # Determine which tools to enable based on fact_types and exclude_mental_models
@@ -6213,6 +6283,8 @@ class MemoryEngine(MemoryEngineInterface):
                 include_chunks=effective_recall_include_chunks,
                 created_after=created_after,
                 created_before=created_before,
+                event_after=event_after,
+                event_before=event_before,
             )
 
         async def expand_fn(memory_ids: list[str], depth: str) -> dict[str, Any]:
@@ -7639,6 +7711,7 @@ class MemoryEngine(MemoryEngineInterface):
             recall_max_tokens_override = trigger_data.get("recall_max_tokens")
             recall_chunks_max_tokens_override = trigger_data.get("recall_chunks_max_tokens")
             refresh_mode = trigger_data.get("mode") or "full"
+            time_scope = _resolve_mental_model_time_scope(trigger_data.get("time_scope"))
 
             current_content = (mental_model.get("content") or "").strip()
             current_source_query = mental_model["source_query"]
@@ -7716,6 +7789,9 @@ class MemoryEngine(MemoryEngineInterface):
                 recall_chunks_max_tokens_override=recall_chunks_max_tokens_override,
                 _skip_span=True,
             )
+            if time_scope is not None:
+                reflect_kwargs["event_after"] = time_scope.event_after
+                reflect_kwargs["event_before"] = time_scope.event_before
             # Forward the per-model max_tokens so the final synthesis is capped at the
             # user-configured limit rather than the reflect_async default.
             stored_max_tokens = mental_model.get("max_tokens")
@@ -8187,6 +8263,7 @@ class MemoryEngine(MemoryEngineInterface):
         tags_match = trigger.get("tags_match")
         if not tags_match:
             tags_match = "any"  # default: untagged MM is "global", tagged MM matches any overlap
+        time_scope = _resolve_mental_model_time_scope(trigger.get("time_scope"))
 
         params: list[Any] = [bank_id, last_refreshed_at]
         where = ["bank_id = $1", "updated_at > $2"]
@@ -8204,6 +8281,12 @@ class MemoryEngine(MemoryEngineInterface):
         if fact_types:
             params.append(fact_types)
             where.append(f"fact_type = ANY(${len(params)}::text[])")
+
+        if time_scope is not None:
+            params.append(time_scope.event_after)
+            where.append(f"COALESCE(occurred_start, mentioned_at, event_date) >= ${len(params)}")
+            params.append(time_scope.event_before)
+            where.append(f"COALESCE(occurred_start, mentioned_at, event_date) < ${len(params)}")
 
         row = await conn.fetchrow(
             f"SELECT 1 FROM {fq_table('memory_units')} WHERE {' AND '.join(where)} LIMIT 1",

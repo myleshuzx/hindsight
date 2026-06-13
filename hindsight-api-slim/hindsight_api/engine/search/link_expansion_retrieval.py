@@ -41,6 +41,40 @@ from .types import GraphRetrievalTimings, RetrievalResult
 logger = logging.getLogger(__name__)
 
 
+def _build_event_range_where_clause(
+    event_after: datetime | None,
+    event_before: datetime | None,
+    param_start: int,
+) -> tuple[str, list[Any]]:
+    clause = ""
+    params: list[Any] = []
+    next_idx = param_start
+    event_expr = "COALESCE(occurred_start, mentioned_at, event_date)"
+    if event_after is not None:
+        params.append(event_after)
+        clause += f" AND {event_expr} >= ${next_idx}"
+        next_idx += 1
+    if event_before is not None:
+        params.append(event_before)
+        clause += f" AND {event_expr} < ${next_idx}"
+    return clause, params
+
+
+def _result_in_event_range(
+    result: RetrievalResult,
+    event_after: datetime | None,
+    event_before: datetime | None,
+) -> bool:
+    event_time = result.occurred_start or result.mentioned_at or result.event_date
+    if event_time is None:
+        return False
+    if event_after is not None and event_time < event_after:
+        return False
+    if event_before is not None and event_time >= event_before:
+        return False
+    return True
+
+
 async def _find_semantic_seeds(
     conn,
     query_embedding_str: str,
@@ -53,6 +87,8 @@ async def _find_semantic_seeds(
     tag_groups: list[TagGroup] | None = None,
     created_after: datetime | None = None,
     created_before: datetime | None = None,
+    event_after: datetime | None = None,
+    event_before: datetime | None = None,
 ) -> list[RetrievalResult]:
     """Find semantic seeds via embedding search."""
     from .tags import build_tag_groups_where_clause, build_tags_where_clause_simple
@@ -72,12 +108,14 @@ async def _find_semantic_seeds(
         created_range_params.append(created_before)
         created_range_clause += f" AND updated_at < ${_next_idx}"
         _next_idx += 1
+    event_range_clause, event_range_params = _build_event_range_where_clause(event_after, event_before, _next_idx)
 
     params = [query_embedding_str, bank_id, fact_type, threshold, limit]
     if tags:
         params.append(tags)
     params.extend(groups_params)
     params.extend(created_range_params)
+    params.extend(event_range_params)
 
     rows = await conn.fetch(
         f"""
@@ -92,6 +130,7 @@ async def _find_semantic_seeds(
           {tags_clause}
           {groups_clause}
           {created_range_clause}
+          {event_range_clause}
         ORDER BY embedding <=> $1::vector
         LIMIT $5
         """,
@@ -135,6 +174,8 @@ class LinkExpansionRetriever(GraphRetriever):
         tag_groups: list[TagGroup] | None = None,
         created_after: "datetime | None" = None,
         created_before: "datetime | None" = None,
+        event_after: "datetime | None" = None,
+        event_before: "datetime | None" = None,
     ) -> tuple[list[RetrievalResult], GraphRetrievalTimings | None]:
         """
         Retrieve facts by expanding links from seeds.
@@ -175,6 +216,8 @@ class LinkExpansionRetriever(GraphRetriever):
                     tag_groups=tag_groups,
                     created_after=created_after,
                     created_before=created_before,
+                    event_after=event_after,
+                    event_before=event_before,
                 )
                 timings.seeds_time = time.time() - seeds_start
                 logger.debug(
@@ -256,6 +299,9 @@ class LinkExpansionRetriever(GraphRetriever):
 
         if tag_groups:
             results = filter_results_by_tag_groups(results, tag_groups)
+
+        if event_after is not None or event_before is not None:
+            results = [r for r in results if _result_in_event_range(r, event_after, event_before)]
 
         timings.result_count = len(results)
         timings.traverse = time.time() - start_time

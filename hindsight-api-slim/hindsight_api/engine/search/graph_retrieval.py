@@ -48,6 +48,8 @@ class GraphRetriever(ABC):
         tag_groups: list[TagGroup] | None = None,  # Compound boolean tag filter groups
         created_after: datetime | None = None,  # Only include memory_units created after this time
         created_before: datetime | None = None,  # Only include memory_units created before this time
+        event_after: datetime | None = None,  # Only include memory_units whose event time is on/after this time
+        event_before: datetime | None = None,  # Only include memory_units whose event time is before this time
     ) -> tuple[list[RetrievalResult], GraphRetrievalTimings | None]:
         """
         Retrieve relevant facts via graph traversal.

@@ -82,6 +82,24 @@ export type TagGroup =
   | { or: TagGroup[] }
   | { not: TagGroup };
 
+export type MentalModelTimeScope =
+  | { type: "absolute"; start_date: string; end_date: string }
+  | { type: "relative"; days: number };
+
+export type MentalModelTrigger = {
+  mode?: "full" | "delta";
+  refresh_after_consolidation: boolean;
+  time_scope?: MentalModelTimeScope;
+  fact_types?: Array<"world" | "experience" | "observation">;
+  exclude_mental_models?: boolean;
+  exclude_mental_model_ids?: string[];
+  tags_match?: TagsMatch;
+  tag_groups?: TagGroup[];
+  include_chunks?: boolean;
+  recall_max_tokens?: number;
+  recall_chunks_max_tokens?: number;
+};
+
 export interface MentalModel {
   id: string;
   bank_id: string;
@@ -90,18 +108,7 @@ export interface MentalModel {
   content: string;
   tags: string[];
   max_tokens: number;
-  trigger: {
-    mode?: "full" | "delta";
-    refresh_after_consolidation: boolean;
-    fact_types?: Array<"world" | "experience" | "observation">;
-    exclude_mental_models?: boolean;
-    exclude_mental_model_ids?: string[];
-    tags_match?: TagsMatch;
-    tag_groups?: TagGroup[];
-    include_chunks?: boolean;
-    recall_max_tokens?: number;
-    recall_chunks_max_tokens?: number;
-  };
+  trigger: MentalModelTrigger;
   last_refreshed_at: string;
   created_at: string;
   reflect_response?: any;
@@ -1057,18 +1064,7 @@ export class ControlPlaneClient {
         content: string;
         tags: string[];
         max_tokens: number;
-        trigger: {
-          mode?: "full" | "delta";
-          refresh_after_consolidation: boolean;
-          fact_types?: Array<"world" | "experience" | "observation">;
-          exclude_mental_models?: boolean;
-          exclude_mental_model_ids?: string[];
-          tags_match?: TagsMatch;
-          tag_groups?: TagGroup[];
-          include_chunks?: boolean;
-          recall_max_tokens?: number;
-          recall_chunks_max_tokens?: number;
-        };
+        trigger: MentalModelTrigger;
         last_refreshed_at: string;
         created_at: string;
         reflect_response?: {
@@ -1091,18 +1087,7 @@ export class ControlPlaneClient {
       source_query: string;
       tags?: string[];
       max_tokens?: number;
-      trigger?: {
-        mode?: "full" | "delta";
-        refresh_after_consolidation: boolean;
-        fact_types?: Array<"world" | "experience" | "observation">;
-        exclude_mental_models?: boolean;
-        exclude_mental_model_ids?: string[];
-        tags_match?: TagsMatch;
-        tag_groups?: TagGroup[];
-        include_chunks?: boolean;
-        recall_max_tokens?: number;
-        recall_chunks_max_tokens?: number;
-      };
+      trigger?: MentalModelTrigger;
     }
   ) {
     return this.fetchApi<{
@@ -1133,18 +1118,7 @@ export class ControlPlaneClient {
       source_query?: string;
       max_tokens?: number;
       tags?: string[];
-      trigger?: {
-        mode?: "full" | "delta";
-        refresh_after_consolidation: boolean;
-        fact_types?: Array<"world" | "experience" | "observation">;
-        exclude_mental_models?: boolean;
-        exclude_mental_model_ids?: string[];
-        tags_match?: TagsMatch;
-        tag_groups?: TagGroup[];
-        include_chunks?: boolean;
-        recall_max_tokens?: number;
-        recall_chunks_max_tokens?: number;
-      };
+      trigger?: MentalModelTrigger;
     }
   ) {
     return this.fetchApi<{
@@ -1155,17 +1129,7 @@ export class ControlPlaneClient {
       content: string;
       tags: string[];
       max_tokens: number;
-      trigger: {
-        refresh_after_consolidation: boolean;
-        fact_types?: Array<"world" | "experience" | "observation">;
-        exclude_mental_models?: boolean;
-        exclude_mental_model_ids?: string[];
-        tags_match?: TagsMatch;
-        tag_groups?: TagGroup[];
-        include_chunks?: boolean;
-        recall_max_tokens?: number;
-        recall_chunks_max_tokens?: number;
-      };
+      trigger: MentalModelTrigger;
       last_refreshed_at: string;
       created_at: string;
       reflect_response?: {

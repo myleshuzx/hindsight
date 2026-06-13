@@ -44,14 +44,20 @@ async def _insert_fact(
     embedding_str: str,
     created_at: datetime,
     updated_at: datetime | None = None,
+    event_date: datetime | None = None,
+    occurred_start: datetime | None = None,
+    mentioned_at: datetime | None = None,
     fact_type: str = "world",
 ) -> None:
     """Insert a memory_unit with a specific created_at/updated_at timestamp."""
     updated = updated_at or created_at
     await conn.execute(
         """
-        INSERT INTO memory_units (id, bank_id, text, fact_type, embedding, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5::vector, $6, $7)
+        INSERT INTO memory_units (
+            id, bank_id, text, fact_type, embedding, created_at, updated_at,
+            event_date, occurred_start, mentioned_at
+        )
+        VALUES ($1, $2, $3, $4, $5::vector, $6, $7, $8, $9, $10)
         """,
         fact_id,
         bank_id,
@@ -60,6 +66,9 @@ async def _insert_fact(
         embedding_str,
         created_at,
         updated,
+        event_date or created_at,
+        occurred_start,
+        mentioned_at,
     )
 
 
@@ -256,3 +265,60 @@ class TestRecallTimeRange:
         ids = _result_ids(result)
         assert ID_OLD in ids, "fact-old created at T1, updated at T3 — created_after=T2 must find it via updated_at"
         assert ID_NEW in ids
+
+    async def test_event_after_uses_event_time_not_updated_at(self, seeded_memory):
+        """event_after filters on occurred_start/mentioned_at/event_date, not updated_at."""
+        engine, bank_id = seeded_memory
+
+        pool = await engine._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE memory_units SET updated_at = $1, occurred_start = $2 WHERE id = $3",
+                T3,
+                T1,
+                ID_OLD,
+            )
+            await conn.execute(
+                "UPDATE memory_units SET updated_at = $1, occurred_start = $2 WHERE id = $3",
+                T1,
+                T3,
+                ID_NEW,
+            )
+
+        result = await engine.recall_async(
+            bank_id=bank_id,
+            query="animals and nature",
+            request_context=RC,
+            max_tokens=10000,
+            event_after=T2,
+        )
+        ids = _result_ids(result)
+        assert ID_OLD not in ids, "updated_at=T3 must not bypass an old event time"
+        assert ID_NEW in ids, "occurred_start=T3 must match even when updated_at is old"
+
+    async def test_event_range_uses_mentioned_at_before_event_date(self, seeded_memory):
+        """COALESCE order uses mentioned_at when occurred_start is absent."""
+        engine, bank_id = seeded_memory
+
+        pool = await engine._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE memory_units
+                SET occurred_start = NULL, mentioned_at = $1, event_date = $2
+                WHERE id = $3
+                """,
+                T1,
+                T3,
+                ID_NEW,
+            )
+
+        result = await engine.recall_async(
+            bank_id=bank_id,
+            query="animals and nature",
+            request_context=RC,
+            max_tokens=10000,
+            event_after=T2,
+        )
+        ids = _result_ids(result)
+        assert ID_NEW not in ids, "mentioned_at=T1 should take precedence over fallback event_date=T3"

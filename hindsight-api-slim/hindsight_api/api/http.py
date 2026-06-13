@@ -1626,6 +1626,46 @@ class UpdateDirectiveRequest(BaseModel):
 # =========================================================================
 
 
+class MentalModelTimeScope(BaseModel):
+    """Event-time source range for mental model refresh."""
+
+    type: Literal["absolute", "relative"] = Field(description="Time scope mode")
+    start_date: str | None = Field(
+        default=None,
+        description="Absolute start date, inclusive, in YYYY-MM-DD format. Required when type='absolute'.",
+    )
+    end_date: str | None = Field(
+        default=None,
+        description="Absolute end date, inclusive, in YYYY-MM-DD format. Required when type='absolute'.",
+    )
+    days: int | None = Field(
+        default=None,
+        ge=1,
+        description="Relative number of calendar days to include, including the refresh day.",
+    )
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> "MentalModelTimeScope":
+        if self.type == "absolute":
+            if not self.start_date or not self.end_date:
+                raise ValueError("absolute time_scope requires start_date and end_date")
+            try:
+                start = datetime.strptime(self.start_date, "%Y-%m-%d")
+                end = datetime.strptime(self.end_date, "%Y-%m-%d")
+            except ValueError as exc:
+                raise ValueError("time_scope dates must use YYYY-MM-DD format") from exc
+            if end < start:
+                raise ValueError("time_scope end_date must be on or after start_date")
+            if self.days is not None:
+                raise ValueError("absolute time_scope must not include days")
+        else:
+            if self.days is None:
+                raise ValueError("relative time_scope requires days")
+            if self.start_date is not None or self.end_date is not None:
+                raise ValueError("relative time_scope must not include start_date or end_date")
+        return self
+
+
 class MentalModelTrigger(BaseModel):
     """Trigger settings for a mental model."""
 
@@ -1642,6 +1682,14 @@ class MentalModelTrigger(BaseModel):
     refresh_after_consolidation: bool = Field(
         default=False,
         description="If true, refresh this mental model after observations consolidation (real-time mode)",
+    )
+    time_scope: MentalModelTimeScope | None = Field(
+        default=None,
+        description=(
+            "Optional event-time filter for source memories during refresh. "
+            "If omitted, no time limit is applied. Absolute scopes use inclusive start/end dates. "
+            "Relative scopes include the refresh day and the previous days-1 days."
+        ),
     )
     fact_types: list[Literal["world", "experience", "observation"]] | None = Field(
         default=None,

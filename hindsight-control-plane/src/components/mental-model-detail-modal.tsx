@@ -947,6 +947,7 @@ function ConfigurationTab({ mentalModel }: { mentalModel: MentalModel }) {
   const factTypes = t.fact_types ?? [];
   const tagGroups = t.tag_groups ?? [];
   const excludeIds = t.exclude_mental_model_ids ?? [];
+  const timeScope = t.time_scope;
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
       <InfoCard title="Identity" icon={<FileText className="w-3.5 h-3.5" />}>
@@ -1032,6 +1033,20 @@ function ConfigurationTab({ mentalModel }: { mentalModel: MentalModel }) {
           }
         />
         <Metadata label="Exclude mental models" value={t.exclude_mental_models ? "Yes" : "No"} />
+        <Metadata
+          label="Source time"
+          value={
+            timeScope?.type === "relative" ? (
+              <Pill label={`Last ${timeScope.days} day${timeScope.days === 1 ? "" : "s"}`} />
+            ) : timeScope?.type === "absolute" ? (
+              <span>
+                {timeScope.start_date} to {timeScope.end_date}
+              </span>
+            ) : (
+              <span className="text-muted-foreground italic text-sm">no limit</span>
+            )
+          }
+        />
         {excludeIds.length > 0 && (
           <Metadata
             label="Excluded IDs"

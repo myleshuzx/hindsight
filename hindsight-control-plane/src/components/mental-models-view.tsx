@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { client, type TagGroup, type TagsMatch } from "@/lib/api";
+import { client, type MentalModelTimeScope, type TagGroup, type TagsMatch } from "@/lib/api";
 import { formatAbsoluteDateTime, formatRelativeTime } from "@/lib/relative-time";
 import { CompactMarkdown } from "./compact-markdown";
 import { useBank } from "@/lib/bank-context";
@@ -87,6 +87,7 @@ interface MentalModel {
   trigger: {
     mode?: "full" | "delta";
     refresh_after_consolidation: boolean;
+    time_scope?: MentalModelTimeScope;
     fact_types?: Array<"world" | "experience" | "observation">;
     exclude_mental_models?: boolean;
     exclude_mental_model_ids?: string[];
@@ -102,6 +103,153 @@ interface MentalModel {
 }
 
 type ViewMode = "dashboard" | "files";
+type TimeScopeMode = "none" | "relative" | "absolute";
+
+type TimeScopeFormFields = {
+  timeScopeMode: TimeScopeMode;
+  relativeDays: string;
+  absoluteStartDate: string;
+  absoluteEndDate: string;
+};
+
+const DEFAULT_TIME_SCOPE_FORM: TimeScopeFormFields = {
+  timeScopeMode: "none",
+  relativeDays: "30",
+  absoluteStartDate: "",
+  absoluteEndDate: "",
+};
+
+function timeScopeToForm(timeScope?: MentalModelTimeScope): TimeScopeFormFields {
+  if (timeScope?.type === "relative") {
+    return {
+      timeScopeMode: "relative",
+      relativeDays: String(timeScope.days),
+      absoluteStartDate: "",
+      absoluteEndDate: "",
+    };
+  }
+  if (timeScope?.type === "absolute") {
+    return {
+      timeScopeMode: "absolute",
+      relativeDays: "30",
+      absoluteStartDate: timeScope.start_date,
+      absoluteEndDate: timeScope.end_date,
+    };
+  }
+  return { ...DEFAULT_TIME_SCOPE_FORM };
+}
+
+function buildTimeScope(form: TimeScopeFormFields): MentalModelTimeScope | undefined | null {
+  if (form.timeScopeMode === "none") return undefined;
+  if (form.timeScopeMode === "relative") {
+    const days = parseInt(form.relativeDays, 10);
+    if (!Number.isFinite(days) || days < 1) {
+      toast.error("Relative time scope must be at least 1 day");
+      return null;
+    }
+    return { type: "relative", days };
+  }
+  if (!form.absoluteStartDate || !form.absoluteEndDate) {
+    toast.error("Absolute time scope requires a start and end date");
+    return null;
+  }
+  if (form.absoluteEndDate < form.absoluteStartDate) {
+    toast.error("Absolute time scope end date must be on or after the start date");
+    return null;
+  }
+  return {
+    type: "absolute",
+    start_date: form.absoluteStartDate,
+    end_date: form.absoluteEndDate,
+  };
+}
+
+function TimeScopeFields<T extends TimeScopeFormFields>({
+  form,
+  setForm,
+  idPrefix,
+}: {
+  form: T;
+  setForm: (next: T) => void;
+  idPrefix: string;
+}) {
+  return (
+    <section className="space-y-4">
+      <h3 className="text-sm font-semibold text-foreground border-b pb-1">Source Time</h3>
+      <div className="space-y-2">
+        <label className="text-sm font-medium text-foreground">Time limit</label>
+        <Select
+          value={form.timeScopeMode}
+          onValueChange={(value) => setForm({ ...form, timeScopeMode: value as TimeScopeMode })}
+        >
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="none">No time limit</SelectItem>
+            <SelectItem value="relative">Relative days</SelectItem>
+            <SelectItem value="absolute">Absolute date range</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          Filters source facts by event time: occurred start, mentioned at, then event date.
+        </p>
+      </div>
+
+      {form.timeScopeMode === "relative" && (
+        <div className="space-y-2">
+          <label
+            htmlFor={`${idPrefix}-relative-days`}
+            className="text-sm font-medium text-foreground"
+          >
+            Days
+          </label>
+          <Input
+            id={`${idPrefix}-relative-days`}
+            type="number"
+            value={form.relativeDays}
+            min="1"
+            onChange={(e) => setForm({ ...form, relativeDays: e.target.value })}
+          />
+          <p className="text-xs text-muted-foreground">
+            Includes the refresh day and the previous days. 30 means today plus the previous 29
+            days.
+          </p>
+        </div>
+      )}
+
+      {form.timeScopeMode === "absolute" && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="space-y-2">
+            <label
+              htmlFor={`${idPrefix}-start-date`}
+              className="text-sm font-medium text-foreground"
+            >
+              Start date
+            </label>
+            <Input
+              id={`${idPrefix}-start-date`}
+              type="date"
+              value={form.absoluteStartDate}
+              onChange={(e) => setForm({ ...form, absoluteStartDate: e.target.value })}
+            />
+          </div>
+          <div className="space-y-2">
+            <label htmlFor={`${idPrefix}-end-date`} className="text-sm font-medium text-foreground">
+              End date
+            </label>
+            <Input
+              id={`${idPrefix}-end-date`}
+              type="date"
+              value={form.absoluteEndDate}
+              onChange={(e) => setForm({ ...form, absoluteEndDate: e.target.value })}
+            />
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
 
 export function MentalModelsView() {
   const { currentBank } = useBank();
@@ -627,6 +775,7 @@ function CreateMentalModelDialog({
     excludeMentalModelIds: "",
     tagsMatch: "" as string,
     tagGroups: "",
+    ...DEFAULT_TIME_SCOPE_FORM,
     // Recall overrides for refresh: "" means inherit bank/global default
     includeChunks: "" as "" | "true" | "false",
     recallMaxTokens: "",
@@ -669,6 +818,8 @@ function CreateMentalModelDialog({
         : undefined;
       const includeChunks =
         form.includeChunks === "true" ? true : form.includeChunks === "false" ? false : undefined;
+      const timeScope = buildTimeScope(form);
+      if (timeScope === null) return;
 
       await client.createMentalModel(currentBank, {
         id: form.id.trim() || undefined,
@@ -679,6 +830,7 @@ function CreateMentalModelDialog({
         trigger: {
           mode: form.mode,
           refresh_after_consolidation: form.autoRefresh,
+          time_scope: timeScope,
           fact_types: form.factTypes.length > 0 ? form.factTypes : undefined,
           exclude_mental_models: form.excludeMentalModels || undefined,
           exclude_mental_model_ids: excludeIds.length > 0 ? excludeIds : undefined,
@@ -703,6 +855,7 @@ function CreateMentalModelDialog({
         excludeMentalModelIds: "",
         tagsMatch: "",
         tagGroups: "",
+        ...DEFAULT_TIME_SCOPE_FORM,
         includeChunks: "",
         recallMaxTokens: "",
         recallChunksMaxTokens: "",
@@ -733,6 +886,7 @@ function CreateMentalModelDialog({
             excludeMentalModelIds: "",
             tagsMatch: "",
             tagGroups: "",
+            ...DEFAULT_TIME_SCOPE_FORM,
             includeChunks: "",
             recallMaxTokens: "",
             recallChunksMaxTokens: "",
@@ -931,6 +1085,8 @@ function CreateMentalModelDialog({
                 </div>
               </section>
 
+              <TimeScopeFields form={form} setForm={setForm} idPrefix="create-time-scope" />
+
               <section className="space-y-4">
                 <h3 className="text-sm font-semibold text-foreground border-b pb-1">Recall</h3>
                 <p className="text-xs text-muted-foreground">
@@ -1052,6 +1208,7 @@ function UpdateMentalModelDialog({
     tagGroups: mentalModel.trigger?.tag_groups
       ? JSON.stringify(mentalModel.trigger.tag_groups, null, 2)
       : "",
+    ...timeScopeToForm(mentalModel.trigger?.time_scope),
     includeChunks: (mentalModel.trigger?.include_chunks === true
       ? "true"
       : mentalModel.trigger?.include_chunks === false
@@ -1110,6 +1267,8 @@ function UpdateMentalModelDialog({
         : undefined;
       const includeChunks =
         form.includeChunks === "true" ? true : form.includeChunks === "false" ? false : undefined;
+      const timeScope = buildTimeScope(form);
+      if (timeScope === null) return;
 
       const updated = await client.updateMentalModel(currentBank, mentalModel.id, {
         name: form.name.trim(),
@@ -1119,6 +1278,7 @@ function UpdateMentalModelDialog({
         trigger: {
           mode: form.mode,
           refresh_after_consolidation: form.autoRefresh,
+          time_scope: timeScope,
           fact_types: form.factTypes.length > 0 ? form.factTypes : undefined,
           exclude_mental_models: form.excludeMentalModels || undefined,
           exclude_mental_model_ids: excludeIds.length > 0 ? excludeIds : undefined,
@@ -1325,6 +1485,8 @@ function UpdateMentalModelDialog({
                   </p>
                 </div>
               </section>
+
+              <TimeScopeFields form={form} setForm={setForm} idPrefix="update-time-scope" />
 
               <section className="space-y-4">
                 <h3 className="text-sm font-semibold text-foreground border-b pb-1">Recall</h3>

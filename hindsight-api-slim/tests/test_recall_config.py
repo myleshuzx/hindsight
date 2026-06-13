@@ -7,6 +7,7 @@ and as overrides on a mental model's `trigger` JSONB field.
 """
 
 import dataclasses
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -143,6 +144,20 @@ class TestMentalModelTriggerRecallFields:
         assert trigger.include_chunks is None
         assert trigger.recall_max_tokens is None
         assert trigger.recall_chunks_max_tokens is None
+        assert trigger.time_scope is None
+
+    def test_trigger_accepts_time_scope(self):
+        from hindsight_api.api.http import MentalModelTrigger
+
+        absolute = MentalModelTrigger(
+            time_scope={"type": "absolute", "start_date": "2026-05-15", "end_date": "2026-06-13"}
+        )
+        relative = MentalModelTrigger(time_scope={"type": "relative", "days": 30})
+
+        assert absolute.time_scope is not None
+        assert absolute.time_scope.type == "absolute"
+        assert relative.time_scope is not None
+        assert relative.time_scope.days == 30
 
 
 class TestRefreshTriggerWiring:
@@ -165,6 +180,11 @@ class TestRefreshTriggerWiring:
                     "recall_max_tokens": 512,
                     "recall_chunks_max_tokens": 0,
                     "fact_types": ["world"],
+                    "time_scope": {
+                        "type": "absolute",
+                        "start_date": "2026-05-15",
+                        "end_date": "2026-06-13",
+                    },
                 },
             }
 
@@ -193,6 +213,8 @@ class TestRefreshTriggerWiring:
         assert captured["recall_max_tokens_override"] == 512
         assert captured["recall_chunks_max_tokens_override"] == 0
         assert captured["fact_types"] == ["world"]
+        assert captured["event_after"] == datetime(2026, 5, 15, tzinfo=UTC)
+        assert captured["event_before"] == datetime(2026, 6, 14, tzinfo=UTC)
 
     @pytest.mark.asyncio
     async def test_missing_trigger_fields_pass_none(self, mock_request_context):
@@ -229,3 +251,5 @@ class TestRefreshTriggerWiring:
         assert captured["recall_include_chunks"] is None
         assert captured["recall_max_tokens_override"] is None
         assert captured["recall_chunks_max_tokens_override"] is None
+        assert "event_after" not in captured
+        assert "event_before" not in captured
