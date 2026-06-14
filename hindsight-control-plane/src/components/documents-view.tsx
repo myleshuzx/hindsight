@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, type FormEvent } from "react";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 import { client, LLMRequestEntry } from "@/lib/api";
@@ -75,6 +75,7 @@ import {
   Upload,
   Lock,
   RotateCcw,
+  Search,
 } from "lucide-react";
 
 const ITEMS_PER_PAGE = 50;
@@ -577,6 +578,7 @@ export function DocumentsView() {
   const { features } = useFeatures();
   const [documents, setDocuments] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  const [searchInput, setSearchInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [total, setTotal] = useState(0);
 
@@ -631,7 +633,7 @@ export function DocumentsView() {
     null
   );
 
-  const loadDocuments = async (page: number = 1) => {
+  const loadDocuments = useCallback(async (page: number = 1, query: string = "") => {
     if (!currentBank) return;
 
     setLoading(true);
@@ -639,7 +641,7 @@ export function DocumentsView() {
       const pageOffset = (page - 1) * ITEMS_PER_PAGE;
       const data: any = await client.listDocuments({
         bank_id: currentBank,
-        q: searchQuery,
+        q: query || undefined,
         limit: ITEMS_PER_PAGE,
         offset: pageOffset,
       });
@@ -650,12 +652,27 @@ export function DocumentsView() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [currentBank]);
 
   // Handle page change
   const handlePageChange = (newPage: number) => {
     setCurrentPage(newPage);
-    loadDocuments(newPage);
+    loadDocuments(newPage, searchQuery);
+  };
+
+  const submitSearch = (event?: FormEvent<HTMLFormElement>) => {
+    event?.preventDefault();
+    const nextQuery = searchInput.trim();
+    setSearchQuery(nextQuery);
+    setCurrentPage(1);
+    loadDocuments(1, nextQuery);
+  };
+
+  const clearSearch = () => {
+    setSearchInput("");
+    setSearchQuery("");
+    setCurrentPage(1);
+    loadDocuments(1, "");
   };
 
   const viewDocumentText = async (documentId: string) => {
@@ -742,7 +759,7 @@ export function DocumentsView() {
       }
 
       // Reload documents list at current page
-      loadDocuments(currentPage);
+      loadDocuments(currentPage, searchQuery);
     } catch (error) {
       console.error("Error deleting document:", error);
       setDeleteResult({
@@ -810,7 +827,7 @@ export function DocumentsView() {
       setSelectedDocument(doc);
       setEditingContent(false);
       setContentInput("");
-      loadDocuments(currentPage);
+      loadDocuments(currentPage, searchQuery);
     } catch (error) {
       console.error("Error updating document content:", error);
     } finally {
@@ -847,21 +864,9 @@ export function DocumentsView() {
   useEffect(() => {
     if (currentBank) {
       setCurrentPage(1);
-      loadDocuments(1);
+      loadDocuments(1, searchQuery);
     }
-  }, [currentBank]);
-
-  // Reload when search query changes (with debounce)
-  useEffect(() => {
-    if (!currentBank) return;
-
-    const timeoutId = setTimeout(() => {
-      setCurrentPage(1);
-      loadDocuments(1);
-    }, 300); // 300ms debounce
-
-    return () => clearTimeout(timeoutId);
-  }, [searchQuery]);
+  }, [currentBank, loadDocuments]);
 
   const triggerDownload = (blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
@@ -921,7 +926,7 @@ export function DocumentsView() {
           skipped: meta.documents_skipped ?? 0,
         })
       );
-      loadDocuments(currentPage);
+      loadDocuments(currentPage, searchQuery);
       setImportDialogOpen(false);
       setImportFile(null);
     } catch {
@@ -1083,6 +1088,39 @@ export function DocumentsView() {
         </DialogContent>
       </Dialog>
       {/* Documents List Section */}
+      <form onSubmit={submitSearch} className="px-5 mb-4 flex max-w-2xl items-center gap-2">
+        <Input
+          type="text"
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
+          placeholder={t("searchPlaceholder")}
+          className="min-w-0 flex-1"
+          disabled={!currentBank}
+        />
+        <Button
+          type="submit"
+          variant="outline"
+          size="sm"
+          className="h-10 w-10 shrink-0 p-0"
+          disabled={!currentBank || loading}
+          aria-label={t("searchPlaceholder")}
+        >
+          <Search className="h-4 w-4" />
+        </Button>
+        {(searchInput || searchQuery) && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-10 w-10 shrink-0 p-0"
+            onClick={clearSearch}
+            disabled={!currentBank || loading}
+            aria-label="Clear document search"
+          >
+            <X className="h-4 w-4" />
+          </Button>
+        )}
+      </form>
       {loading ? (
         <div className="flex items-center justify-center py-20">
           <div className="text-center">
@@ -1095,16 +1133,6 @@ export function DocumentsView() {
           <div className="mb-4 text-sm text-muted-foreground">{t("totalDocuments", { total })}</div>
           {/* Documents Table */}
           <div className="w-full">
-            <div className="px-5 mb-4">
-              <Input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder={t("searchPlaceholder")}
-                className="max-w-2xl"
-              />
-            </div>
-
             <div className="overflow-x-auto px-5 pb-5">
               <Table>
                 <TableHeader>
